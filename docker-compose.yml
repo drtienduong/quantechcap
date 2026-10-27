@@ -1,5 +1,8 @@
-# QuanTechCap - chạy:  docker compose up -d      (xem log: docker compose logs -f web)
-# Chỉ gồm web. Desk (máy bàn) chạy engine Windows .exe nên chưa đóng gói được trong container Linux.
+# QuanTechCap
+#   Dev (localhost, không có .env):  docker compose up      -> http://127.0.0.1:8800
+#   Production (VPS, .env từ .env.example, COMPOSE_PROFILES=prod):
+#                                     docker compose up -d   -> https://quantechcap.com (Caddy + Let's Encrypt)
+# Desk (máy bàn) không nằm trong compose: desk tự gọi ra web.
 services:
   web:
     build:
@@ -8,11 +11,14 @@ services:
     image: quantechcap-web:latest
     container_name: quantechcap-web
     restart: unless-stopped
-    # Chỉ mở trên 127.0.0.1 của máy chủ: trên VPS, Caddy (HTTPS) đứng trước và proxy vào đây.
+    environment:
+      QC_SECURE_COOKIE: ${QC_SECURE_COOKIE:-0}
+    # Chỉ nghe trên 127.0.0.1 của máy: dev mở trình duyệt vào đây; trên VPS bên ngoài chỉ vào được qua Caddy.
     ports:
       - "127.0.0.1:${QC_WEB_PORT:-8800}:8800"
     volumes:
       - qc_web_data:/data        # web_config.json (desk_token) + qc.sqlite
+    networks: [qc]
     read_only: true
     tmpfs:
       - /tmp
@@ -25,11 +31,50 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
-    logging:
+    logging: &logging
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
+  caddy:
+    profiles: ["prod"]
+    image: caddy:2
+    container_name: quantechcap-caddy
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      QC_DOMAIN: ${QC_DOMAIN:-quantechcap.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data         # chứng chỉ TLS - đừng xóa (Let's Encrypt giới hạn số lần cấp)
+      - caddy_config:/config
+    networks: [qc]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging: *logging
+
+networks:
+  qc:
+
 volumes:
   qc_web_data:
+  caddy_data:
+  caddy_config:

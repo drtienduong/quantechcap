@@ -1,22 +1,35 @@
 # Chạy QuanTechCap bằng Docker
 
-Không cần cài Python trên máy. Chỉ cần Docker (Docker Desktop trên Windows/macOS, Docker Engine + compose plugin trên Linux).
+Chỉ cần Docker (Docker Desktop trên Windows/macOS, Docker Engine + compose plugin trên Ubuntu). Không cần cài Python.
+Lệnh giống nhau trên mọi hệ điều hành.
 
-Hiện compose chỉ đóng gói **web** (backend + giao diện). **Desk** vẫn chạy trực tiếp trên Windows của máy bàn,
-vì engine là `backtest-optimzie-rust-cli.exe` (Windows) và `cpucap.py` dùng Job Object của Windows. Xem mục cuối.
-
-## Chạy
+## Dev (localhost)
 
     git clone <repo> quantechcap
     cd quantechcap
-    docker compose up -d            # lần đầu tự build image
-    docker compose logs -f web      # xem log
+    docker compose up            # thêm -d để chạy nền
 
-Mở http://127.0.0.1:8800 (chỉ nghe trên 127.0.0.1 của máy chủ; trên VPS thì Caddy HTTPS proxy vào cổng này).
-Đổi cổng phía máy chủ: đặt `QC_WEB_PORT=8900` trong file `.env` cạnh docker-compose.yml.
+Mở http://127.0.0.1:8800. Không cần file `.env`. Chỉ có container `web`, không có Caddy, cookie không Secure (http).
 
-Lần đầu khởi động, container tự tạo `web_config.json` với `desk_token` ngẫu nhiên trong volume `qc_web_data`
-(không in token ra log). Các lần sau giữ nguyên.
+## Production (VPS) -> https://quantechcap.com
+
+Chuẩn bị một lần:
+1. DNS: bản ghi A `quantechcap.com` -> IP VPS. Lần đầu để Cloudflare ở chế độ DNS-only (đám mây xám) để Caddy xin
+   chứng chỉ Let's Encrypt thuận lợi.
+2. Tường lửa VPS mở 22, 80, 443 (TCP).
+3. Trong thư mục repo: `cp .env.example .env` (giữ `COMPOSE_PROFILES=prod`, `QC_DOMAIN`, `QC_SECURE_COOKIE=1`).
+
+Chạy:
+
+    docker compose up -d
+    docker compose logs -f caddy     # thấy "certificate obtained successfully" là xong
+
+`COMPOSE_PROFILES=prod` trong `.env` làm Caddy chạy kèm. Caddy tự xin và gia hạn chứng chỉ, chuyển http -> https,
+thêm HSTS và header bảo mật, proxy vào `web:8800` trong mạng nội bộ của Docker.
+Web vẫn chỉ nghe ở 127.0.0.1:8800 của VPS (debug qua SSH tunnel), bên ngoài chỉ vào được qua Caddy.
+
+Lưu ý: Docker tự mở cổng đã publish, bỏ qua ufw. Ở đây chỉ publish 80/443 (Caddy) và 127.0.0.1:8800 nên vẫn an toàn.
+Không xóa volume `caddy_data` (chứa chứng chỉ; Let's Encrypt giới hạn số lần cấp).
 
 ## Quản trị (chạy trong container)
 
@@ -31,9 +44,11 @@ Lần đầu khởi động, container tự tạo `web_config.json` với `desk_
     git pull && docker compose up -d --build
     docker compose cp web:/data ./backup-web-data      # sao lưu config + qc.sqlite
 
-KHÔNG chạy `docker compose down -v` nếu không muốn xóa database và desk_token.
+KHÔNG chạy `docker compose down -v` (xóa database, desk_token và chứng chỉ).
 
 ## Desk
 
-Desk gọi ra web (`web_url` trong `desk_config.json`), web không gọi vào máy bàn. Khi web chạy trong Docker trên
-cùng máy bàn, `web_url` vẫn là `http://127.0.0.1:8800`. `token` trong desk_config.json = kết quả `show-token`.
+Desk (máy bàn) không nằm trong compose; nó tự gọi ra web. `desk_config.json`:
+- dev: `"web_url": "http://127.0.0.1:8800"`
+- production: `"web_url": "https://quantechcap.com"`
+`token` = kết quả `show-token` của web tương ứng.

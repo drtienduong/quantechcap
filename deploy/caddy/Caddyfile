@@ -1,0 +1,32 @@
+# QuanTechCap - Caddy (chỉ chạy ở profile "prod", trên VPS).
+# Tự xin và gia hạn chứng chỉ Let's Encrypt cho QC_DOMAIN (cần DNS A trỏ về VPS, cổng 80 + 443 mở).
+{
+	# Chỉ HTTP/1.1 + HTTP/2 trên TCP 443 (không mở UDP 443 cho HTTP/3).
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$QC_DOMAIN} {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Khớp MAX_BODY 12 MB của qc_web.py (có dư).
+	request_body {
+		max_size 16MB
+	}
+
+	reverse_proxy web:8800
+
+	log {
+		output stdout
+		format console
+	}
+}

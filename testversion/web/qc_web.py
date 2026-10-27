@@ -55,6 +55,9 @@ def load_config():
         cfg["host"] = os.environ["QC_HOST"]
     if os.environ.get("QC_PORT"):
         cfg["port"] = int(os.environ["QC_PORT"])
+    # Production sau Caddy/HTTPS: QC_SECURE_COOKIE=1 (cookie chỉ gửi qua HTTPS). Dev http://127.0.0.1 để 0.
+    if os.environ.get("QC_SECURE_COOKIE", "").strip():
+        cfg["secure_cookie"] = os.environ["QC_SECURE_COOKIE"].strip().lower() in ("1", "true", "yes")
     return cfg
 
 
