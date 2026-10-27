@@ -1,0 +1,13 @@
+# Không đưa bí mật, dữ liệu, log, desk vào image
+**/web_config.json
+**/desk_config.json
+**/*.env
+**/.env
+**/*.sqlite*
+**/*.db
+**/data/
+**/state/
+**/*.log
+**/__pycache__/
+**/*.pyc
+desk/

@@ -91,6 +91,8 @@ Cây code: `C:\Claude\workspace\claude_traders\quantechcap\`
 - Ít nhất 9 job chạy qua luồng web → desk, đều exit 0. Job optimize (job 3) tạo report đúng cấu trúc `ver_..._opt_...` kèm `_eval`.
 - Các job chạy chỉ vài giây trong khi một run thật mất khoảng 77 phút. Cấu hình thử có vẻ rất ngắn nên kết quả chỉ dùng để kiểm tra luồng. Nguyên nhân chưa xác nhận.
 
+Docker (2026-10-27): web đóng gói được bằng `docker-compose.yml` ở gốc repo (xem `DOCKER.md`): image python slim, không cần pip, user thường, root chỉ đọc, chỉ mở 127.0.0.1:8800, config + SQLite trong volume `qc_web_data`, tự tạo desk_token lần đầu. Đã kiểm luồng khởi động bằng Python với cùng biến môi trường; CHƯA build/chạy image thật vì máy bàn chưa có Docker. Desk chưa đóng gói được (engine .exe Windows, cpucap dùng API Windows).
+
 Chưa làm: cắt dữ liệu `data-is` (hiện `data_folder` trỏ thẳng vào `data-tickstory` đầy đủ), tài khoản Windows quyền thấp, cổng OS1, publisher lên VPS, dựng VPS, sao lưu, hạn mức và ledger.
 
 Lưu ý bảo mật: token desk nằm dạng chữ thường trong `desk_config.json` và `web_config.json`. Cần đổi và quản lý riêng trước khi đưa lên VPS. Bật `secure_cookie` khi dùng HTTPS.

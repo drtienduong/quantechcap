@@ -1,6 +1,7 @@
 """QuanTechCap - quản trị (chỉ Dương chạy trên máy chủ web). Không có đăng ký tự do.
 
-  python qc_admin.py init                           tạo web_config.json (có desk_token ngẫu nhiên) + desk_config mẫu
+  python qc_admin.py init [--quiet]                 tạo web_config.json (có desk_token ngẫu nhiên); --quiet: không in token
+  python qc_admin.py show-token                     in desk_token (để dán vào desk_config.json)
   python qc_admin.py add-user EMAIL SLUG [--admin]  tạo tài khoản, in mật khẩu ngẫu nhiên MỘT LẦN
   python qc_admin.py passwd EMAIL                   đặt lại mật khẩu ngẫu nhiên
   python qc_admin.py list-users
@@ -17,15 +18,27 @@ def newpw():
     return secrets.token_urlsafe(12)
 
 
-def cmd_init():
+def cmd_init(quiet=False):
+    """quiet=True (dùng khi container khởi động): không in token ra log; lấy bằng `show-token`."""
     if W.CONFIG_PATH.exists():
-        print("web_config.json đã có, giữ nguyên:", W.CONFIG_PATH)
+        if not quiet:
+            print("web_config.json đã có, giữ nguyên:", W.CONFIG_PATH)
         return
+    W.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     cfg = dict(W.DEFAULTS, desk_token=secrets.token_urlsafe(32))
     W.CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     W.init_db()
     print("Đã tạo", W.CONFIG_PATH)
-    print("desk_token (dán vào desk_config.json của máy bàn):", cfg["desk_token"])
+    if quiet:
+        print("desk_token đã tạo (không in ra log). Xem bằng: python qc_admin.py show-token")
+    else:
+        print("desk_token (dán vào desk_config.json của máy bàn):", cfg["desk_token"])
+
+
+def cmd_show_token():
+    if not W.CONFIG_PATH.exists():
+        sys.exit("Chưa có web_config.json. Chạy: python qc_admin.py init")
+    print(json.loads(W.CONFIG_PATH.read_text(encoding="utf-8")).get("desk_token", ""))
 
 
 def cmd_add_user(email, slug, admin):
@@ -65,7 +78,9 @@ def cmd_list():
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["init"]:
-        cmd_init()
+        cmd_init(quiet="--quiet" in a)
+    elif a[:1] == ["show-token"]:
+        cmd_show_token()
     elif a[:1] == ["add-user"] and len(a) >= 3:
         cmd_add_user(a[1], a[2], "--admin" in a)
     elif a[:1] == ["passwd"] and len(a) == 2:

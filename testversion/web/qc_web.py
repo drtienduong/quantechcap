@@ -28,9 +28,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "common"))
 import qc_common as C  # noqa: E402
 
-DATA_DIR = HERE / "data"
+# Docker: đặt QC_DATA_DIR / QC_WEB_CONFIG trỏ vào volume; không đặt thì giữ như cũ (cạnh file này).
+DATA_DIR = Path(os.environ.get("QC_DATA_DIR") or HERE / "data")
 DB_PATH = DATA_DIR / "qc.sqlite"
-CONFIG_PATH = HERE / "web_config.json"
+CONFIG_PATH = Path(os.environ.get("QC_WEB_CONFIG") or HERE / "web_config.json")
 STATIC = HERE / "static"
 STATIC_FILES = {"/static/app.js": "application/javascript; charset=utf-8",
                 "/static/style.css": "text/css; charset=utf-8"}
@@ -49,6 +50,11 @@ def load_config():
     cfg = dict(DEFAULTS)
     if CONFIG_PATH.exists():
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    # Trong container phải nghe 0.0.0.0 để Docker chuyển cổng vào; giới hạn ra ngoài do docker-compose (127.0.0.1:8800).
+    if os.environ.get("QC_HOST"):
+        cfg["host"] = os.environ["QC_HOST"]
+    if os.environ.get("QC_PORT"):
+        cfg["port"] = int(os.environ["QC_PORT"])
     return cfg
 
 

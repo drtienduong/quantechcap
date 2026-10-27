@@ -1,0 +1,35 @@
+# QuanTechCap - chạy:  docker compose up -d      (xem log: docker compose logs -f web)
+# Chỉ gồm web. Desk (máy bàn) chạy engine Windows .exe nên chưa đóng gói được trong container Linux.
+services:
+  web:
+    build:
+      context: ./testversion
+      dockerfile: web/Dockerfile
+    image: quantechcap-web:latest
+    container_name: quantechcap-web
+    restart: unless-stopped
+    # Chỉ mở trên 127.0.0.1 của máy chủ: trên VPS, Caddy (HTTPS) đứng trước và proxy vào đây.
+    ports:
+      - "127.0.0.1:${QC_WEB_PORT:-8800}:8800"
+    volumes:
+      - qc_web_data:/data        # web_config.json (desk_token) + qc.sqlite
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  qc_web_data:
