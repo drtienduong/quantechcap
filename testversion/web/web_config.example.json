@@ -1,0 +1,8 @@
+{
+  "host": "127.0.0.1",
+  "port": 8800,
+  "desk_token": "CHANGE_ME",
+  "secure_cookie": false,
+  "session_hours": 12,
+  "limits": {}
+}

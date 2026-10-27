@@ -1,0 +1,17 @@
+{
+  "web_url": "http://127.0.0.1:8800",
+  "token": "CHANGE_ME",
+  "rq_root": "C:\\Users\\zicza\\Documents\\rust-quant",
+  "data_folder": "C:\\Users\\zicza\\Documents\\rust-quant\\data-tickstory",
+  "swap_folder": "C:\\Users\\zicza\\Documents\\rust-quant\\data-swap",
+  "python": "C:\\Claude\\.venv\\Scripts\\python.exe",
+  "tools": "C:\\Claude\\workspace\\claude_traders\\_shared\\tools",
+  "cli": "C:\\Users\\zicza\\Documents\\rust-quant\\backtest-optimzie-rust-tool\\backtest-optimzie-rust-cli.exe",
+  "traders": {
+    "duong-nguyen": {
+      "dir": "C:\\Claude\\workspace\\claude_traders\\duong_nguyen_claude",
+      "name": "duong_nguyen"
+    }
+  },
+  "limits": {}
+}
