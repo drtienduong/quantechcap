@@ -11,10 +11,10 @@ Lệnh giống nhau trên mọi hệ điều hành.
 
 Mở http://127.0.0.1:8800. Không cần file `.env`. Chỉ có container `web`, không có Caddy, cookie không Secure (http).
 
-## Production (VPS) -> https://quantechcap.com
+## Production (VPS) -> https://research.quantechcap.com
 
 Chuẩn bị một lần:
-1. DNS: bản ghi A `quantechcap.com` -> IP VPS. Lần đầu để Cloudflare ở chế độ DNS-only (đám mây xám) để Caddy xin
+1. DNS: bản ghi A `research` (tức `research.quantechcap.com`) -> IP VPS. Lần đầu để Cloudflare ở chế độ DNS-only (đám mây xám) để Caddy xin
    chứng chỉ Let's Encrypt thuận lợi.
 2. Tường lửa VPS mở 22, 80, 443 (TCP).
 3. Trong thư mục repo: `cp .env.example .env` (giữ `COMPOSE_PROFILES=prod`, `QC_DOMAIN`, `QC_SECURE_COOKIE=1`).
@@ -50,5 +50,5 @@ KHÔNG chạy `docker compose down -v` (xóa database, desk_token và chứng ch
 
 Desk (máy bàn) không nằm trong compose; nó tự gọi ra web. `desk_config.json`:
 - dev: `"web_url": "http://127.0.0.1:8800"`
-- production: `"web_url": "https://quantechcap.com"`
+- production: `"web_url": "https://research.quantechcap.com"`
 `token` = kết quả `show-token` của web tương ứng.

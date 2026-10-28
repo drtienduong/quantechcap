@@ -1,7 +1,7 @@
 # QuanTechCap
 #   Dev (localhost, không có .env):  docker compose up      -> http://127.0.0.1:8800
 #   Production (VPS, .env từ .env.example, COMPOSE_PROFILES=prod):
-#                                     docker compose up -d   -> https://quantechcap.com (Caddy + Let's Encrypt)
+#                                     docker compose up -d   -> https://research.quantechcap.com (Caddy + Let's Encrypt)
 # Desk (máy bàn) không nằm trong compose: desk tự gọi ra web.
 services:
   web:
@@ -46,7 +46,7 @@ services:
       web:
         condition: service_healthy
     environment:
-      QC_DOMAIN: ${QC_DOMAIN:-quantechcap.com}
+      QC_DOMAIN: ${QC_DOMAIN:-research.quantechcap.com}
     ports:
       - "80:80"
       - "443:443"

@@ -13,7 +13,7 @@ Hệ thống cho một nhóm quant trader cùng nghiên cứu alpha forex:
 - Mục tiêu của mỗi trader: tạo alpha vượt bộ lọc IS (sau đó OS1 và xác nhận). OS2 là holdout mù do Dương giữ.
 - Mọi trader dùng chung một bộ dữ liệu tick (`data-tickstory`, khoảng 627 GB) nằm trên máy bàn của Dương.
 - Trader dùng AI để viết strategy (alpha) theo mẫu, chạy backtest/optimize bằng công cụ chung, rồi xem báo cáo trên web.
-- Mỗi trader có một tên miền riêng dạng `ho-ten.quantechcap.com`. Hostname không cho dấu gạch dưới hay dấu tiếng Việt, nên dùng gạch ngang và ASCII (ví dụ `nguyen-an`).
+- Toàn bộ platform đặt tại một địa chỉ: `research.quantechcap.com` (Dương chốt 28/10/2026). Không tạo subdomain riêng cho từng trader; mỗi trader chỉ có một tài khoản đăng nhập. Slug trader (ASCII, gạch ngang, ví dụ `nguyen-an`) chỉ dùng nội bộ.
 - Dương thấy tất cả. Trader không thấy alpha của nhau.
 
 Ngoài phạm vi giai đoạn đầu: giao dịch thật, thanh toán, chia sẻ dữ liệu thô ra ngoài.
@@ -63,8 +63,8 @@ Luồng một job (như đã thống nhất):
 6. Máy bàn offline thì web phải báo rõ job đang chờ.
 
 Thành phần máy bàn: bot Telegram và agent, desk, worker, thư mục alpha và report của từng trader.
-Thành phần VPS (đề xuất): Caddy (TLS, định tuyến theo subdomain), lớp đăng nhập, viewer.
-Cloudflare: DNS wildcard `*.quantechcap.com` trỏ về VPS. Chọn DNS-only hay bật proxy thì chưa quyết.
+Thành phần VPS (đề xuất): Caddy (TLS cho research.quantechcap.com), lớp đăng nhập, viewer.
+Cloudflare: một bản ghi A `research.quantechcap.com` trỏ về VPS (không cần wildcard). Lần đầu DNS-only để Caddy xin chứng chỉ; bật proxy hay không thì chưa quyết.
 
 ---
 
@@ -91,7 +91,7 @@ Cây code: `C:\Claude\workspace\claude_traders\quantechcap\`
 - Ít nhất 9 job chạy qua luồng web → desk, đều exit 0. Job optimize (job 3) tạo report đúng cấu trúc `ver_..._opt_...` kèm `_eval`.
 - Các job chạy chỉ vài giây trong khi một run thật mất khoảng 77 phút. Cấu hình thử có vẻ rất ngắn nên kết quả chỉ dùng để kiểm tra luồng. Nguyên nhân chưa xác nhận.
 
-Docker (2026-10-27): web đóng gói được bằng `docker-compose.yml` ở gốc repo (xem `DOCKER.md`): image python slim, không cần pip, user thường, root chỉ đọc, chỉ mở 127.0.0.1:8800, config + SQLite trong volume `qc_web_data`, tự tạo desk_token lần đầu. Đã kiểm luồng khởi động bằng Python với cùng biến môi trường; CHƯA build/chạy image thật vì máy bàn chưa có Docker. Desk không nằm trong compose (engine .exe Windows, cpucap dùng API Windows); desk tự gọi ra web. Caddy nằm trong compose ở profile `prod`: VPS có `.env` (COMPOSE_PROFILES=prod) thì `docker compose up` ra https://quantechcap.com; localhost không có `.env` thì chỉ web ở http://127.0.0.1:8800. Đã kiểm: Caddyfile hợp lệ (caddy validate 2.8.4), chạy thử Caddy proxy trước web: đăng nhập được, cookie có Secure, header HSTS/nosniff/DENY có. Chưa kiểm: xin chứng chỉ thật trên VPS, build image Docker thật.
+Docker (2026-10-27): web đóng gói được bằng `docker-compose.yml` ở gốc repo (xem `DOCKER.md`): image python slim, không cần pip, user thường, root chỉ đọc, chỉ mở 127.0.0.1:8800, config + SQLite trong volume `qc_web_data`, tự tạo desk_token lần đầu. Đã kiểm luồng khởi động bằng Python với cùng biến môi trường; CHƯA build/chạy image thật vì máy bàn chưa có Docker. Desk không nằm trong compose (engine .exe Windows, cpucap dùng API Windows); desk tự gọi ra web. Caddy nằm trong compose ở profile `prod`: VPS có `.env` (COMPOSE_PROFILES=prod) thì `docker compose up` ra https://research.quantechcap.com; localhost không có `.env` thì chỉ web ở http://127.0.0.1:8800. Đã kiểm: Caddyfile hợp lệ (caddy validate 2.8.4), chạy thử Caddy proxy trước web: đăng nhập được, cookie có Secure, header HSTS/nosniff/DENY có. Chưa kiểm: xin chứng chỉ thật trên VPS, build image Docker thật.
 
 Chưa làm: cắt dữ liệu `data-is` (hiện `data_folder` trỏ thẳng vào `data-tickstory` đầy đủ), tài khoản Windows quyền thấp, cổng OS1, publisher lên VPS, dựng VPS, sao lưu, hạn mức và ledger.
 
@@ -137,7 +137,7 @@ Chưa kiểm chứng: toàn bộ phần VPS, hành vi Cloudflare, công cụ c�
 - Giai đoạn 0 (đang làm): bản thử web → desk với một trader (duong-nguyen), chạy cục bộ, chưa giấu OS2.
 - Giai đoạn 1: cắt dữ liệu `data-is`. Điều kiện bắt buộc trước khi cho trader thật chạy backtest.
 - Giai đoạn 2: tài khoản quyền thấp, hàng đợi, ledger; dời cây sang ổ riêng.
-- Giai đoạn 3: dựng VPS (Caddy, đăng nhập, viewer, cổng nhận báo cáo), DNS wildcard, thử với 1-2 trader.
+- Giai đoạn 3: dựng VPS (Caddy, đăng nhập, viewer, cổng nhận báo cáo), DNS research.quantechcap.com, thử với 1-2 trader.
 - Giai đoạn 4: cổng OS1, agent tổng hợp, hạn mức, báo cáo chi phí, sao lưu; mở lên 5 trader.
 
 Tiêu chí qua cửa mỗi giai đoạn: trader tự đi hết chu kỳ (ý tưởng → alpha → smoke → optimize IS → xem web) mà không cần Dương can thiệp, và kiểm thử chủ động xác nhận không có truy cập vượt quyền (alpha/agent không đọc được OS2, dữ liệu của trader khác, token).
