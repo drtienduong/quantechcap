@@ -1,0 +1,12 @@
+# Bổ sung cho VPS dùng chung với Nginx Proxy Manager (NPM) - thay cho Caddy.
+# Dùng: trong .env đặt
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.npm.yml
+#   COMPOSE_PROFILES=            (để trống: KHÔNG chạy caddy, NPM đã giữ 80/443)
+# NPM: Proxy Host research.quantechcap.com -> http://quantechcap-web:8800 (Let's Encrypt, Force SSL, HSTS).
+services:
+  web:
+    networks: [qc, proxy]
+
+networks:
+  proxy:
+    external: true   # mạng docker có sẵn của NPM
