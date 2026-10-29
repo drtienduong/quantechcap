@@ -10,6 +10,8 @@ Chạy:  python qc_web.py        (cấu hình ở web_config.json, tạo bằng 
 """
 import hashlib
 import hmac
+import io
+import zipfile
 import http.cookies
 import json
 import os
@@ -38,6 +40,7 @@ STATIC_FILES = {"/static/app.js": "application/javascript; charset=utf-8",
 KIT_DIR = STATIC / "kit"
 KIT_FILES = {"HUONG_DAN.md", "AI_GUIDE.md", "qc_alpha_api.rs", "alpha_template.rs", "example_ma_cross_bar.rs",
              "example_tick_range_breakout.rs", "reserved_names.txt", "local_check.rs"}
+KIT_ZIP = "quantechcap_alpha_kit.zip"
 MAX_ALPHA_BYTES = 200_000
 SUB_PER_HOUR = 30          # số lần nộp alpha tối đa mỗi giờ / trader
 SUB_MAX_OPEN = 3           # số bản nộp đang chờ kiểm tra cùng lúc / trader
@@ -251,6 +254,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.fail(401, "chưa đăng nhập")
         finally:
             con.close()
+        if name == KIT_ZIP:
+            # toàn bộ bộ khung trong một file zip (thư mục quantechcap_alpha_kit/)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(KIT_FILES):
+                    if (KIT_DIR / f).is_file():
+                        z.write(KIT_DIR / f, "quantechcap_alpha_kit/" + f)
+            return self.send_bytes(200, buf.getvalue(), "application/zip",
+                                   [("Content-Disposition", 'attachment; filename="%s"' % KIT_ZIP)])
         if name not in KIT_FILES or not (KIT_DIR / name).is_file():
             return self.fail(404, "không tìm thấy")
         ctype = "text/markdown; charset=utf-8" if name.endswith(".md") else "text/plain; charset=utf-8"

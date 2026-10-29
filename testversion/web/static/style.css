@@ -54,3 +54,4 @@ table.vwt th{position:sticky;top:0;background:#f7f8fa;color:#1d2433;font-size:12
 @media(max-width:820px){.vw{display:block}.vwside,.vwmain,.vwdet{margin-top:10px}.vwcards{grid-template-columns:repeat(2,1fr)}}
 .vwbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;padding:6px 12px;background:#fff;border:1px solid #d9dee5;border-radius:8px;font-size:13px}
 .vwbar span:last-child::before{content:", ";color:#68717d}
+a.btn{display:inline-block;text-decoration:none}

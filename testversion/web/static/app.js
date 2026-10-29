@@ -162,14 +162,15 @@ async function pageSubmit(main) {
 
   main.replaceChildren(
     h("h2", {}, "Nộp alpha"),
-    h("div", { class: "card" }, h("h3", {}, "1. Bộ khung cho AI của bạn"),
-      h("p", {}, "Tải các file dưới đây, đưa cho AI của bạn (Claude, ChatGPT…) kèm ý tưởng giao dịch. Yêu cầu AI đọc AI_GUIDE.md trước."),
-      h("ul", {}, ST.kit.map((f) => h("li", {}, h("a", { href: "/kit/" + f, download: f, class: "mono" }, f)))),
-      h("p", { class: "muted" }, "Alpha chỉ được tính toán trên dữ liệu engine đưa vào; không đọc file, mạng, dữ liệu ngoài. Vi phạm sẽ bị từ chối tự động.")),
-    h("div", { class: "card" }, h("h3", {}, "2. Nộp mã nguồn (.rs)"),
+    h("div", { class: "card" }, h("h3", {}, "Nộp mã nguồn (.rs)"),
       h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, `Tên alpha (kết thúc bằng ${suffix})`, h("br"), nameIn), btn),
       info,
       h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về.")),
+    h("div", { class: "card" }, h("h3", {}, "Bộ khung alpha cho AI của bạn"),
+      h("p", {}, "Tải bộ khung, giải nén, đưa toàn bộ cho AI của bạn (Claude, ChatGPT…) kèm ý tưởng giao dịch. Yêu cầu AI đọc AI_GUIDE.md trước."),
+      h("a", { href: "/kit/quantechcap_alpha_kit.zip", download: "quantechcap_alpha_kit.zip", class: "btn primary" }, "Tải bộ khung (.zip)"),
+      h("p", { class: "muted" }, "Gồm: ", ST.kit.join(", "), "."),
+      h("p", { class: "muted" }, "Alpha chỉ được tính toán trên dữ liệu engine đưa vào; không đọc file, mạng, dữ liệu ngoài. Vi phạm sẽ bị từ chối tự động.")),
     detail,
     h("div", { class: "card" }, h("h3", {}, "Các lần nộp"), listBox));
   let pending = await load();
