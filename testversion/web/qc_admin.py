@@ -32,7 +32,7 @@ def cmd_init(quiet=False):
     if quiet:
         print("desk_token đã tạo (không in ra log). Xem bằng: python qc_admin.py show-token")
     else:
-        print("desk_token (dán vào desk_config.json của máy bàn):", cfg["desk_token"])
+        print("desk_token (dán vào desk_config.json của data-server):", cfg["desk_token"])
 
 
 def cmd_show_token():

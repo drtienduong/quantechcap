@@ -187,7 +187,7 @@ def run_job(job):
     try:
         t = TRADERS.get(slug)
         if not t:
-            return fail("trader không có trong cấu hình máy bàn")
+            return fail("trader không có trong cấu hình data-server")
         cfg = job["config"]
         alpha = cfg.get("alpha", "")
         cat = _catalog.get(slug, {}).get(alpha)
@@ -198,7 +198,7 @@ def run_job(job):
             return fail("alpha không có trong thư mục alpha của trader")
         clean_cfg, errs = C.validate_job(cfg, cat, LIMITS)     # KHÔNG tin web
         if errs:
-            return fail("cấu hình bị máy bàn từ chối: " + "; ".join(errs))
+            return fail("cấu hình bị data-server từ chối: " + "; ".join(errs))
         alpha_file = alpha + ".rs"
         alpha_path = (t["dir"] / "alpha" / alpha_file).resolve()
         if t["dir"] not in alpha_path.parents or not alpha_path.is_file():
@@ -213,7 +213,7 @@ def run_job(job):
         smoke = clean_cfg["type"] == "smoke"
         if smoke:
             cmd.append("--smoke")
-        upd(jid, status="running", message="Bắt đầu chạy trên máy bàn", progress=0)
+        upd(jid, status="running", message="Bắt đầu chạy trên data-server", progress=0)
 
         run_id = status_path = None
         for attempt in range(60):      # rq_run chỉ cho 1 run nặng một lúc -> chờ nếu bận (tối đa ~20 phút)
@@ -224,14 +224,14 @@ def run_job(job):
                 run_id, status_path = m.group(1), Path(m.group(2).strip())
                 break
             if "BUSY" in out:
-                resp = upd(jid, message=f"Máy bàn đang bận run khác, chờ… ({attempt + 1})")
+                resp = upd(jid, message=f"Data-server đang bận run khác, chờ… ({attempt + 1})")
                 if resp.get("cancel"):
                     return upd(jid, status="cancelled", message="Đã hủy")
                 time.sleep(20)
                 continue
             return fail("rq_run từ chối: " + out.strip()[-400:])
         if not run_id:
-            return fail("hết thời gian chờ máy bàn rảnh")
+            return fail("hết thời gian chờ data-server rảnh")
 
         t0 = time.time()
         last = 0
@@ -286,7 +286,7 @@ def handle_request(req):
         entry = jobs_index().get(str(jid))
         t = TRADERS.get(slug)
         if not entry or not t or entry["slug"] != slug:
-            raise ValueError("không có kết quả của job này trên máy bàn")
+            raise ValueError("không có kết quả của job này trên data-server")
         run_dir = Path(entry["run_dir"]).resolve()
         if t["dir"] not in run_dir.parents:
             raise ValueError("đường dẫn không hợp lệ")

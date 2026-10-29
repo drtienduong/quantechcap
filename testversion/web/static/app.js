@@ -53,7 +53,7 @@ function QC_LOGIN() {
 function QC_APP() {
   const root = document.getElementById("app");
   const main = h("main");
-  const deskBadge = h("span", { class: "badge" }, "máy bàn: ?");
+  const deskBadge = h("span", { class: "badge" }, "data-server: ?");
   const nav = h("div", { id: "nav" });
   root.append(h("header", {}, h("span", { class: "brand" }, "QuanTechCap"), nav, h("span", { class: "sp" }), deskBadge,
     h("span", { id: "who" }), h("button", { class: "btn", on: { click: async () => { await api("/api/logout", {}); location.href = "/login"; } } }, "Đăng xuất")), main);
@@ -61,7 +61,7 @@ function QC_APP() {
   async function refreshStatus() {
     const s = await api("/api/status");
     ST = s;
-    deskBadge.textContent = s.desk_online ? "máy bàn: online" : "máy bàn: offline";
+    deskBadge.textContent = s.desk_online ? "data-server: online" : "data-server: offline";
     deskBadge.className = "badge " + (s.desk_online ? "on" : "off");
     document.getElementById("who").textContent = s.email;
   }
@@ -94,8 +94,8 @@ async function pageAlphas(main) {
     h("td", { class: "muted" }, a.updated), h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))));
   main.replaceChildren(h("h2", {}, "Alpha của bạn"),
     h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Đồng bộ"), h("th")), rows)
-      : h("p", { class: "muted" }, "Chưa có alpha. Hãy nhờ agent viết alpha trong thư mục alpha của bạn; máy bàn đồng bộ danh sách mỗi phút.")),
-    h("p", { class: "muted" }, "Mã alpha nằm trên máy bàn, không đi qua web. Web chỉ gửi cấu hình chạy."));
+      : h("p", { class: "muted" }, "Chưa có alpha. Hãy nhờ agent viết alpha trong thư mục alpha của bạn; data-server đồng bộ danh sách mỗi phút.")),
+    h("p", { class: "muted" }, "Mã alpha nằm trên data-server, không đi qua web. Web chỉ gửi cấu hình chạy."));
 }
 
 /* ---------- form chạy ---------- */
@@ -160,7 +160,7 @@ async function pageRun(main, name) {
     submit.disabled = false;
     if (j.ok) { location.hash = "#/job/" + j.id; return; }
     msg.append(h("p", { class: "err" }, j.error || "Lỗi"), h("ul", {}, (j.details || []).map((d) => h("li", { class: "err" }, d))));
-  } } }, "Gửi job về máy bàn");
+  } } }, "Gửi job về data-server");
 
   main.replaceChildren(
     h("h2", {}, "Chạy: ", h("span", { class: "mono" }, name)),
@@ -187,7 +187,7 @@ async function pageRun(main, name) {
 }
 
 /* ---------- danh sách job ---------- */
-const statusLabel = { queued: "đang chờ", dispatched: "đã giao máy bàn", running: "đang chạy", done: "xong", failed: "lỗi", cancelled: "đã hủy" };
+const statusLabel = { queued: "đang chờ", dispatched: "đã giao data-server", running: "đang chạy", done: "xong", failed: "lỗi", cancelled: "đã hủy" };
 const tag = (s) => h("span", { class: "tag " + s }, statusLabel[s] || s);
 
 async function pageJobs(main) {
@@ -206,14 +206,14 @@ async function pageJobs(main) {
 
 /* ---------- chi tiết job ---------- */
 async function requestData(jobId, kind, runId, offset, statusEl) {
-  statusEl.textContent = "Đang lấy từ máy bàn…";
+  statusEl.textContent = "Đang lấy từ data-server…";
   const r = await api(`/api/jobs/${jobId}/request`, { kind, run_id: runId, offset });
   if (!r.ok) { statusEl.textContent = r.error || "Lỗi"; return null; }
   for (let i = 0; i < 100; i++) {
     await new Promise((res) => setTimeout(res, 600));
     const q = await api("/api/requests/" + r.id);
     if (q.status === "done") { statusEl.textContent = ""; return q.result; }
-    if (q.status === "timeout") { statusEl.textContent = "Máy bàn không phản hồi (offline?)."; return null; }
+    if (q.status === "timeout") { statusEl.textContent = "Data-server không phản hồi (offline?)."; return null; }
   }
   statusEl.textContent = "Quá thời gian chờ."; return null;
 }
@@ -249,7 +249,7 @@ async function pageJob(main, id) {
       h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate} · swap ${c.swap_mode} · ${c.variants} biến thể`),
       h("p", { class: "mono muted" }, Object.entries(c.params).filter(([, v]) => v[1] > 0).map(([k, v]) => `${k}: ${v[0]}→${v[2]} step ${v[1]}`).join("  |  ") || "(không có lưới)"),
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,
-      job.summary ? h("p", {}, `Kết quả: ${job.summary.variants} biến thể, ${job.summary.is_pass} pass IS, ${job.summary.minutes} phút. Thư mục báo cáo trên máy bàn: ${job.summary.report || ""}`) : null);
+      job.summary ? h("p", {}, `Kết quả: ${job.summary.variants} biến thể, ${job.summary.is_pass} pass IS, ${job.summary.minutes} phút. Thư mục báo cáo trên data-server: ${job.summary.report || ""}`) : null);
     const ver = job.summary && job.summary.report ? String(job.summary.report).split(/[\/]/).pop() : "";
     const slim = job.status === "done" && job.summary ? h("div", { class: "vwbar" }, h("span", { class: "mono" }, job.alpha), h("span", { class: "mono" }, ver), h("span", {}, `${job.summary.variants} run`)) : null;
     if (job.status === "done" && !viewer) viewer = buildViewer(id, job);
@@ -356,8 +356,8 @@ function buildViewer(id, job) {
     tradeBtn.onclick = () => loadTrades(v.run_id, 0);
     cards.replaceChildren(); inputsBox.replaceChildren(); testerBox.replaceChildren(); metricsBox.replaceChildren();
     const st = h("p", { class: "muted" });
-    eqInfo.textContent = "Đang lấy từ máy bàn…";
-    // chi tiết (metrics/tester/inputs) và equity: lấy theo yêu cầu từ máy bàn
+    eqInfo.textContent = "Đang lấy từ data-server…";
+    // chi tiết (metrics/tester/inputs) và equity: lấy theo yêu cầu từ data-server
     const [det, eq] = await Promise.all([requestData(id, "detail", v.run_id, 0, st), requestData(id, "equity", v.run_id, 0, st)]);
     if (tok !== S.token) return;   // người dùng đã chọn run khác
     if (det && det.ok) {
@@ -371,7 +371,7 @@ function buildViewer(id, job) {
       testerBox.replaceChildren(...vkv(tt));
       metricsBox.replaceChildren(...vkv(Object.fromEntries(METRIC_NAMES.filter((n) => m[n] !== undefined).map((n) => [n, m[n]]))));
     } else {
-      cards.replaceChildren(h("p", { class: "err" }, (det && det.error) || "Không lấy được chi tiết (máy bàn offline?)"));
+      cards.replaceChildren(h("p", { class: "err" }, (det && det.error) || "Không lấy được chi tiết (data-server offline?)"));
     }
     if (eq && eq.ok) { drawEquity(canvas, eq.points); eqInfo.textContent = `${eq.points.length}/${eq.total_points} points`; }
     else { drawEquity(canvas, []); eqInfo.textContent = (eq && eq.error) || "Không có equity"; }

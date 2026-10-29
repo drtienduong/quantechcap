@@ -1,4 +1,4 @@
-"""QuanTechCap - phần dùng chung cho web (VPS) và desk (máy bàn).
+"""QuanTechCap - phần dùng chung cho web (VPS) và desk (data-server).
 
 - validate_job(): kiểm tra cấu hình job có cấu trúc từ form. CẢ web VÀ desk đều gọi; desk không tin web.
 - build_ini(): dựng input-optimize.ini từ cấu hình đã kiểm tra. Web KHÔNG BAO GIỜ nhận file .ini thô.
@@ -62,7 +62,7 @@ def _num(v, name, lo=None, hi=None):
 
 
 def validate_job(cfg, catalog, limits=None):
-    """Trả về (cfg_sạch, lỗi). catalog: {tên_tham_số: [start, step, stop]} của alpha được chọn (từ máy bàn)."""
+    """Trả về (cfg_sạch, lỗi). catalog: {tên_tham_số: [start, step, stop]} của alpha được chọn (từ data-server)."""
     lim = dict(DEFAULT_LIMITS, **(limits or {}))
     errs = []
     if not isinstance(cfg, dict):

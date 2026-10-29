@@ -2,8 +2,8 @@
 
 Vai trò:
 - Trader đăng nhập (email + mật khẩu do Dương cấp), chọn alpha, cấu hình backtest/optimize bằng form, xem kết quả.
-- Máy bàn (desk) GỌI RA đây: lấy job, báo tiến độ, đẩy kết quả tóm tắt, trả dữ liệu trade/equity theo yêu cầu.
-  Máy chủ web KHÔNG có đường vào máy bàn và KHÔNG chứa data tick hay mã alpha.
+- Data-server (desk) GỌI RA đây: lấy job, báo tiến độ, đẩy kết quả tóm tắt, trả dữ liệu trade/equity theo yêu cầu.
+  Máy chủ web KHÔNG có đường vào data-server và KHÔNG chứa data tick hay mã alpha.
 - Chỉ dùng thư viện chuẩn của Python.
 
 Chạy:  python qc_web.py        (cấu hình ở web_config.json, tạo bằng qc_admin.py init)
@@ -328,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(400, "thiếu alpha")
         a = con.execute("select params_json from alphas where user_id=? and name=?", (uid, cfg["alpha"])).fetchone()
         if not a:
-            return self.fail(400, "alpha không có trong danh sách của bạn (máy bàn chưa đồng bộ?)")
+            return self.fail(400, "alpha không có trong danh sách của bạn (data-server chưa đồng bộ?)")
         clean, errs = C.validate_job(cfg, json.loads(a["params_json"]), LIMITS)
         if errs:
             return self.send_json({"ok": False, "error": "cấu hình không hợp lệ", "details": errs}, 400)
@@ -383,7 +383,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "id": cur.lastrowid})
         return self.fail(404, "không tìm thấy")
 
-    # ---------- API của máy bàn ----------
+    # ---------- API của data-server ----------
     def desk_api(self, method, path, q):
         con = db()
         try:
