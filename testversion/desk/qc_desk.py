@@ -24,8 +24,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "common"))
 import qc_common as C  # noqa: E402
+sys.path.insert(0, str(HERE))
+import qc_alpha_check as AC  # noqa: E402
 
-CONFIG_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "desk_config.json"
+CONFIG_PATH = (Path(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].endswith(".json")
+               else Path(os.environ.get("QC_DESK_CONFIG") or HERE / "desk_config.json"))
 CFG = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 WEB = CFG["web_url"].rstrip("/")
 TOKEN = CFG["token"]
@@ -36,12 +39,18 @@ RQ_ROOT = CFG["rq_root"]
 DATA_FOLDER = CFG["data_folder"]
 SWAP_FOLDER = CFG["swap_folder"]
 LIMITS = dict(C.DEFAULT_LIMITS, **CFG.get("limits", {}))
-TRADERS = {slug: {"dir": Path(t["dir"]).resolve(), "name": t["name"]} for slug, t in CFG["traders"].items()}
-STATE = HERE / "state"
+# auto_approve: CHỈ Dương bật trong desk_config.json (data-server là nơi quyết định, không tin cờ nào từ web)
+TRADERS = {slug: {"dir": Path(t["dir"]).resolve(), "name": t["name"], "auto_approve": t.get("auto_approve") is True}
+           for slug, t in CFG["traders"].items()}
+RUNNER_TEMPLATE = Path(CFG.get("runner_template") or Path(RQ_ROOT) / "backtest-optimzie-rust-tool" / "src" / "runner_template.rs")
+SMOKE_TIMEOUT_MIN = float(CFG.get("smoke_timeout_min", 20))
+STATE = Path(CFG.get("state_dir") or HERE / "state")
 STATE.mkdir(exist_ok=True)
 JOBS_FILE = STATE / "jobs.json"
 
-job_busy = threading.Event()
+heavy_busy = threading.Event()   # đang chạy optimize (hàng nặng)
+smoke_busy = threading.Event()   # đang chạy smoke (hàng nhanh, chạy song song với hàng nặng)
+sub_busy = threading.Event()     # đang kiểm tra một bản nộp alpha
 _jobs_lock = threading.Lock()
 _catalog = {}   # slug -> {alpha_name: params}
 _cat_hash = {}
@@ -131,6 +140,24 @@ def jobs_save(jid, slug, run_dir):
 
 
 # ---------- chạy job ----------
+def pid_alive(pid):
+    """Kiểm tra tiến trình còn sống (Windows). KHÔNG dùng os.kill trên Windows: nó gọi TerminateProcess."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    h = k32.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return False
+        return code.value == 259                    # STILL_ACTIVE
+    finally:
+        k32.CloseHandle(h)
+
+
 def upd(jid, **kw):
     try:
         return api("POST", f"/api/desk/jobs/{jid}/update", kw, timeout=30)
@@ -212,7 +239,7 @@ def run_job(job):
                "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
         smoke = clean_cfg["type"] == "smoke"
         if smoke:
-            cmd.append("--smoke")
+            cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
         upd(jid, status="running", message="Bắt đầu chạy trên data-server", progress=0)
 
         run_id = status_path = None
@@ -235,11 +262,14 @@ def run_job(job):
 
         t0 = time.time()
         last = 0
-        for _ in range(200):           # chờ file trạng thái xuất hiện
+        for _ in range(240):           # chờ file trạng thái xuất hiện (tối đa 2 phút)
             if status_path.exists():
                 break
             time.sleep(0.5)
+        if not status_path.exists():
+            return fail("run không khởi động được trên data-server (tiến trình chạy thoát sớm). Thử lại sau.")
         st = {}
+        dead_since = None
         while True:
             time.sleep(2)
             try:
@@ -248,6 +278,13 @@ def run_job(job):
                 continue
             if st.get("state") in ("done", "failed"):
                 break
+            # tiến trình run chết mà không kịp ghi trạng thái -> báo lỗi thay vì chờ mãi
+            if st.get("pid") and not pid_alive(st["pid"]):
+                dead_since = dead_since or time.time()
+                if time.time() - dead_since > 20:
+                    return fail("tiến trình run trên data-server dừng bất thường")
+            else:
+                dead_since = None
             if time.time() - last >= 8:
                 last = time.time()
                 pct, txt = read_progress(run_id)
@@ -276,7 +313,90 @@ def run_job(job):
     except Exception as e:  # noqa: BLE001
         fail(repr(e))
     finally:
-        job_busy.clear()
+        (smoke_busy if job.get("config", {}).get("type") == "smoke" else heavy_busy).clear()
+
+
+# ---------- nộp alpha: cách ly -> kiểm tra -> duyệt -> cài ----------
+SUB_MSG = {
+    "rejected_static": "Không đạt kiểm tra an toàn ({n} lỗi). Sửa rồi nộp lại.",
+    "rejected_compile": "Lỗi biên dịch ({n} lỗi). Sửa rồi nộp lại.",
+    "pending_review": "Đạt kiểm tra tự động và biên dịch. Chờ duyệt.",
+    "approved_auto": "Đạt kiểm tra, tự duyệt. Alpha đã có trong danh sách.",
+}
+
+
+def sub_update(sid, status, message, result=None):
+    body = {"status": status, "message": message}
+    if result is not None:
+        body["result"] = result
+    try:
+        api("POST", f"/api/desk/submissions/{sid}/update", body, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        log("cập nhật bản nộp lỗi", sid, repr(e))
+
+
+def sub_dir(t, sid, name):
+    d = (t["dir"] / "submissions" / f"{int(sid):06d}_{name}").resolve()
+    if t["dir"] not in d.parents:
+        raise ValueError("đường dẫn bản nộp không hợp lệ")
+    return d
+
+
+def install_alpha(t, name, src_text):
+    """Chép mã đã duyệt vào thư mục alpha của trader (ghi đè bản cũ cùng tên = phiên bản mới)."""
+    dest = (t["dir"] / "alpha" / f"{name}.rs").resolve()
+    if t["dir"] not in dest.parents:
+        raise ValueError("đường dẫn alpha không hợp lệ")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".rs.tmp")
+    tmp.write_text(src_text, encoding="utf-8", newline="\n")
+    os.replace(tmp, dest)
+    return dest
+
+
+def handle_submission(sb):
+    sid = sb.get("id")
+    try:
+        slug, name, src = sb.get("slug"), sb.get("name"), sb.get("source")
+        t = TRADERS.get(slug)
+        if not t:
+            return sub_update(sid, "failed", "trader không có trên data-server")
+        if not isinstance(name, str) or not C.NAME_RE.match(name) or not name.endswith("_" + t["name"]):
+            return sub_update(sid, "rejected", f"tên alpha phải kết thúc bằng _{t['name']}")
+        if not isinstance(src, str) or not src.strip():
+            return sub_update(sid, "failed", "không nhận được mã nguồn")
+        raw = src.encode("utf-8")
+        sha = hashlib.sha256(raw).hexdigest()
+        if sb.get("sha256") and sb["sha256"] != sha:
+            return sub_update(sid, "failed", "mã nhận được không khớp mã đã nộp (sha256)")
+        qd = sub_dir(t, sid, name)
+        qd.mkdir(parents=True, exist_ok=True)
+        (qd / "source.rs").write_bytes(raw)          # khu cách ly: chưa vào thư mục alpha
+        res = AC.check(src, RUNNER_TEMPLATE)
+        meta = {"id": sid, "slug": slug, "name": name, "sha256": sha, "size": len(raw),
+                "received": time.strftime("%Y-%m-%d %H:%M:%S"), "check": res}
+        if not res["static_ok"]:
+            meta["status"], msg = "rejected", SUB_MSG["rejected_static"].format(n=len(res["static_errors"]))
+        elif res["compile_ok"] is False:
+            meta["status"], msg = "rejected", SUB_MSG["rejected_compile"].format(n=len(res["compile_errors"]))
+        elif t["auto_approve"]:
+            install_alpha(t, name, src)
+            meta["status"], meta["approved_by"], msg = "approved", "auto", SUB_MSG["approved_auto"]
+        else:
+            meta["status"], msg = "pending_review", SUB_MSG["pending_review"]
+        (qd / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        log(f"bản nộp {sid} {name}: {meta['status']}")
+        sub_update(sid, meta["status"], msg, {k: res[k] for k in ("static_errors", "compile_errors", "params", "fn_name")})
+        if meta["status"] == "approved":
+            try:
+                sync_catalog(force=True)
+            except Exception as e:  # noqa: BLE001
+                log("đồng bộ alpha sau khi cài lỗi", repr(e))
+    except Exception as e:  # noqa: BLE001
+        log("kiểm tra bản nộp lỗi", sid, repr(e))
+        sub_update(sid, "failed", "lỗi phía data-server khi kiểm tra: " + repr(e)[:200])
+    finally:
+        sub_busy.clear()
 
 
 # ---------- yêu cầu dữ liệu theo trang ----------
@@ -351,18 +471,28 @@ def main():
     backoff = 3
     while True:
         try:
-            busy = job_busy.is_set()
-            # Rảnh: giữ kết nối tối đa 25s (nhận job tức thì). Bận: chỉ chờ 4s để vừa phục vụ yêu cầu xem trade/equity,
-            # vừa nhận job kế tiếp ngay khi job hiện tại xong.
-            r = api("GET", f"/api/desk/poll?wait={4 if busy else 25}&accept_jobs={0 if busy else 1}", timeout=45)
+            # Mỗi lúc chỉ MỘT run (smoke hoặc optimize): giới hạn CPU 50% dùng chung (Job Object RustQuantCPU50)
+            # không nhận tiến trình thứ hai khi đang có run (quy tắc job lồng nhau của Windows). Web ưu tiên giao smoke trước.
+            run_busy = heavy_busy.is_set() or smoke_busy.is_set()
+            lanes = [] if run_busy else ["heavy", "smoke"]
+            busy = run_busy or sub_busy.is_set()
+            # Rảnh: giữ kết nối tối đa 25s (nhận việc tức thì). Bận: chỉ chờ 4s để vừa phục vụ yêu cầu xem trade/equity,
+            # vừa nhận việc kế tiếp ngay khi xong.
+            r = api("GET", f"/api/desk/poll?wait={4 if busy else 25}&accept={','.join(lanes) or 'none'}"
+                           f"&accept_sub={0 if sub_busy.is_set() else 1}", timeout=45)
             backoff = 3
             item = r.get("item")
             if not item:
                 continue
             if item["type"] == "job":
-                job_busy.set()
-                log(f"nhận job {item['job']['id']} ({item['job']['slug']})")
+                is_smoke = item["job"].get("config", {}).get("type") == "smoke"
+                (smoke_busy if is_smoke else heavy_busy).set()
+                log(f"nhận job {item['job']['id']} ({item['job']['slug']}, {'smoke' if is_smoke else 'heavy'})")
                 threading.Thread(target=run_job, args=(item["job"],), daemon=True).start()
+            elif item["type"] == "submission":
+                sub_busy.set()
+                log(f"nhận bản nộp {item['submission']['id']} ({item['submission']['slug']})")
+                threading.Thread(target=handle_submission, args=(item["submission"],), daemon=True).start()
             else:
                 threading.Thread(target=handle_request, args=(item["request"],), daemon=True).start()
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:

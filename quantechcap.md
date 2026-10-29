@@ -12,7 +12,7 @@ Hệ thống cho một nhóm quant trader cùng nghiên cứu alpha forex:
 
 - Mục tiêu của mỗi trader: tạo alpha vượt bộ lọc IS (sau đó OS1 và xác nhận). OS2 là holdout mù do Dương giữ.
 - Mọi trader dùng chung một bộ dữ liệu tick (`data-tickstory`, khoảng 627 GB) nằm trên máy bàn của Dương.
-- Trader dùng AI để viết strategy (alpha) theo mẫu, chạy backtest/optimize bằng công cụ chung, rồi xem báo cáo trên web.
+- Trader tự dùng AI của họ trên máy của họ để viết alpha theo bộ khung QuanTechCap, nộp mã nguồn lên web, chạy backtest/optimize trên data-server, rồi xem báo cáo trên web (quyết định 29/10/2026).
 - Toàn bộ platform đặt tại một địa chỉ: `research.quantechcap.com` (Dương chốt 28/10/2026). Không tạo subdomain riêng cho từng trader; mỗi trader chỉ có một tài khoản đăng nhập. Slug trader (ASCII, gạch ngang, ví dụ `nguyen-an`) chỉ dùng nội bộ.
 - Dương thấy tất cả. Trader không thấy alpha của nhau.
 
@@ -27,10 +27,12 @@ Ngoài phạm vi giai đoạn đầu: giao dịch thật, thanh toán, chia sẻ
 3. Trader đăng nhập bằng email và mật khẩu do Dương cấp trực tiếp. Không đăng ký tự do.
 4. Web server đặt ở VPS OVHcloud Singapore: 2 vCore, 4 GB RAM, đĩa 40 GB.
 5. **Máy bàn tính toán, VPS chỉ hiển thị.** Máy bàn luôn là bên gọi ra VPS, VPS không có đường vào máy bàn. Lý do: bộ tick quá nặng để kéo qua mạng, VPS nhỏ không chạy nổi optimizer, và nếu VPS bị tấn công thì không có đường vào máy bàn.
-6. **Mã alpha ở lại máy bàn** (cách 1):
- - Alpha do các agent con viết cùng trader qua Telegram.
- - Alpha lưu trong thư mục alpha của trader trên máy bàn.
- - Web chỉ chọn alpha có sẵn trong danh sách. Web không nhận và không gửi mã.
+6. **Alpha nộp qua web, có cổng kiểm** (đổi ngày 29/10/2026, thay cho "cách 1" agent viết alpha):
+ - Trader tự viết alpha bằng AI của họ, dựa trên bộ khung + alpha mẫu tải trên web. Dương KHÔNG cung cấp agent cho trader, KHÔNG phát SDK/engine, KHÔNG phát dữ liệu mẫu. Mọi lần chạy đều trên data-server.
+ - Trader nộp MÃ NGUỒN `.rs` (không nộp file chạy). Web chỉ giữ mã tạm đến khi data-server kéo về rồi xóa; mã và report lưu ở data-server.
+ - Data-server: khu cách ly -> công cụ kiểm tra tự động (danh sách cho phép) -> biên dịch thử (chỉ trả lỗi thuộc alpha) -> duyệt (agent platform duyệt; trader được Dương cấp quyền trong desk_config thì tự duyệt) -> mới vào thư mục alpha của trader.
+ - Alpha chỉ được dùng dữ liệu engine đưa vào (tick/bar trong data-server). Không đọc file, mạng, tiến trình, biến môi trường, không `unsafe`, không dữ liệu ngoài.
+ - Bắt buộc trước khi nhận mã của trader ngoài Dương: `data-is` (giấu OS2) và tài khoản Windows quyền thấp `qc_runner` để biên dịch/chạy alpha.
 7. **Web không nhận file `.ini` thô.** Form có cấu trúc, máy bàn tự dựng lại file cấu hình và tự ép `data_folder`, `swap_folder`, `todate`.
 8. **Tách job IS và OS1.** Job optimize chạy đến 2024-01-01 nên `results.sqlite` không bao giờ chứa OS1. OS1 là loại job riêng, chỉ cho biến thể đã pass IS, qua cổng có ghi sổ.
 9. **Tải báo cáo theo nhu cầu.** Web chỉ nhận bản tóm tắt. Danh sách lệnh (phần nặng nhất) chỉ tải khi trader bấm xem, mỗi trang 100 lệnh. Phần run cũng làm tương tự.
@@ -45,7 +47,7 @@ Trader (trình duyệt)                 Trader (Telegram)
        |                                   |
        v                                   v
 VPS OVH Singapore                    MÁY BÀN CỦA DƯƠNG (24/7)
- - web: đăng nhập, form job,          - bot + agent của từng trader (viết alpha)
+ - web: đăng nhập, form job,          - (bỏ agent cho trader từ 29/10/2026)
    hàng đợi, trạng thái, báo cáo      - desk: gọi ra web lấy job
  - lưu bản tóm tắt báo cáo            - backtest tool (rq_run) + data-tickstory
                                       - thư mục report của từng trader
@@ -62,7 +64,7 @@ Luồng một job (như đã thống nhất):
 5. Máy bàn đẩy lên VPS bản tóm tắt (bảng biến thể) và tiến độ. Trades và equity chỉ gửi khi trader bấm xem.
 6. Máy bàn offline thì web phải báo rõ job đang chờ.
 
-Thành phần máy bàn: bot Telegram và agent, desk, worker, thư mục alpha và report của từng trader.
+Thành phần máy bàn (data-server): desk, công cụ kiểm tra alpha, worker, thư mục alpha/submissions/report của từng trader.
 Thành phần VPS (đề xuất): Caddy (TLS cho research.quantechcap.com), lớp đăng nhập, viewer.
 Cloudflare: một bản ghi A `research.quantechcap.com` trỏ về VPS (không cần wildcard). Lần đầu DNS-only để Caddy xin chứng chỉ; bật proxy hay không thì chưa quyết.
 
@@ -96,6 +98,7 @@ Docker (2026-10-27): web đóng gói được bằng `docker-compose.yml` ở g�
 VPS (2026-10-28): VPS 15.235.208.240 (Ubuntu 26.04) dùng chung với các dịch vụ có sẵn của Dương (Nginx Proxy Manager giữ 80/443 cho note.quantechcap.com, Portainer, RustDesk, webnote, openclaw). Vì vậy KHÔNG dùng Caddy; web chạy ở /opt/stacks/quantechcap (docker-compose.yml + docker-compose.npm.yml, .env từ .env.npm.example), container quantechcap-web nối mạng `proxy` của NPM, chỉ publish 127.0.0.1:8800. NPM proxy host research.quantechcap.com -> quantechcap-web:8800 (Let's Encrypt). Đã kiểm: build image thật trên VPS OK, healthy, NPM gọi được web (200). Token desk đã đổi (tạo mới trên VPS), tài khoản web mới (mật khẩu ở file trên máy bàn, ngoài repo). Desk chạy qua Task Scheduler QuanTechCap_desk (lúc đăng nhập, run_desk.ps1 tự khởi động lại), web_url https://research.quantechcap.com.
 Đã lên mạng (2026-10-28): https://research.quantechcap.com qua NPM (Let's Encrypt, Force SSL, HSTS). Kiểm thử đầu-cuối 18/18 PASS (đăng nhập, cô lập 2 tài khoản, CSRF, chặn todate > 2024, job smoke web -> desk -> kết quả, trang lệnh theo yêu cầu). Chưa kiểm trên trình duyệt thật. Admin chưa có màn xem dữ liệu của trader (API lọc theo user_id). VPS đã cập nhật hết gói và reboot sau snapshot.
 Desk 24/7 (2026-10-29): desk đã dừng từ 17:55 ngày 28 (mã 0xC000013A, nhiều khả năng cửa sổ console bị Windows Terminal mở thành tab rồi bị đóng); tác vụ chỉ khởi động lúc đăng nhập nên không tự lên lại. Sửa: `install_desk_task.ps1` đăng ký lại QuanTechCap_desk với watchdog mỗi 5 phút (MultipleInstances=IgnoreNew), RestartCount 999, không giới hạn thời gian; run_desk.ps1 có mutex một vòng chạy và không bật qc_desk.py thứ hai nếu bản cũ còn sống. Chế độ hiện tại (không admin): khởi động lúc đăng nhập, chạy qua `conhost --headless` (không cửa sổ). Đã kiểm: giết desk lúc 10:48:40, watchdog bật lại 10:51:01; giết riêng run_desk thì không sinh desk trùng. Chưa làm (cần Dương chạy script bằng quyền admin một lần): chế độ S4U khởi động cùng máy không cần đăng nhập, chưa kiểm chứng.
+Nộp alpha qua web (2026-10-29): bộ khung `testversion/web/static/kit/` (AI_GUIDE.md, HUONG_DAN.md, qc_alpha_api.rs, alpha_template.rs, 2 alpha mẫu, reserved_names.txt, local_check.rs), tải ở trang "Nộp alpha" (cần đăng nhập). Web nhận mã nguồn `.rs` (<= 200 KB, tên phải có hậu tố `_<slug với _>`, giới hạn 30 lần/giờ, 3 bản chờ), giao cho desk rồi XÓA mã khỏi web. Desk: khu cách ly `<trader>/submissions/<id>_<tên>/` -> `qc_alpha_check.py` (kiểm tĩnh theo danh sách cho phép + biên dịch thử --emit=metadata trong khung engine thật, chỉ trả lỗi thuộc alpha) -> chờ duyệt (`qc_review.py list/show/approve/reject`) hoặc tự duyệt nếu `auto_approve: true` trong desk_config -> chép vào `<trader>/alpha/`. Smoke: tối đa 92 ngày, 3 symbol, được ưu tiên trước optimize đang chờ (KHÔNG chạy song song: Job Object RustQuantCPU50 của cpucap không nhận tiến trình thứ hai khi đã có run; sửa cần đổi cpucap.py của claude_traders). Desk không còn chờ mãi khi run không khởi động được (lỗi sau 2 phút, hoặc 20 giây sau khi tiến trình run chết). Đã kiểm: checker chặn 32/32 mẫu lách, 35/47 alpha cũ qua (12 bị chặn đúng: đọc CSV ngoài, static, > 200 KB); 2 alpha mẫu chạy smoke thật trên engine; kiểm thử đầu-cuối cục bộ 40/40 (D:\quantechcap-data-research\e2e\e2e_submit.py). Chưa kiểm trên trình duyệt thật.
 Hardening VPS đã làm: chặn cổng 81 (admin NPM) và 9443 (Portainer) từ internet bằng DOCKER-USER trong /etc/ufw/after.rules, after6.rules (vào qua SSH tunnel); tắt SSH mật khẩu (kiểm phiên khóa mới OK); fail2ban sshd; unattended-upgrades vốn đã bật. Sao lưu cấu hình trước khi sửa: /opt/backup/pre-qc-20261028-1510.
 
 Chưa làm: cắt dữ liệu `data-is` (hiện `data_folder` trỏ thẳng vào `data-tickstory` đầy đủ), tài khoản Windows quyền thấp, cổng OS1, sao lưu, hạn mức và ledger.

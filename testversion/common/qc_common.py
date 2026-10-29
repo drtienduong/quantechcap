@@ -18,6 +18,8 @@ DEFAULT_LIMITS = {
     "max_variants_smoke": 20,
     "is_end": "2024.01.01",      # job IS không được vượt mốc này (OS1 mở qua cổng riêng, chưa có ở bản thử)
     "min_from": "2003.01.01",
+    "smoke_max_days": 92,        # hàng smoke chạy song song với optimize nên phải ngắn
+    "smoke_max_symbols": 3,
 }
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
@@ -93,6 +95,8 @@ def validate_job(cfg, catalog, limits=None):
             or any(s not in FX25 for s in syms):
         errs.append("symbols: danh sách không rỗng, không trùng, thuộc 25 cặp FX cho phép")
     out["symbols"] = [s for s in FX25 if isinstance(syms, list) and s in syms]  # thứ tự chuẩn
+    if typ == "smoke" and isinstance(syms, list) and len(syms) > lim["smoke_max_symbols"]:
+        errs.append(f"smoke: tối đa {lim['smoke_max_symbols']} symbol")
 
     if cfg.get("period") not in PERIODS:
         errs.append(f"period phải thuộc {PERIODS}")
@@ -107,6 +111,8 @@ def validate_job(cfg, catalog, limits=None):
             errs.append(f"todate phải <= {lim['is_end']} (job IS không được chạm OS1/OS2)")
         if fd >= td:
             errs.append("fromdate phải trước todate")
+        if typ == "smoke" and (td - fd).days > lim["smoke_max_days"]:
+            errs.append(f"smoke: khoảng thời gian tối đa {lim['smoke_max_days']} ngày")
     except ValueError as e:
         errs.append(str(e))
 

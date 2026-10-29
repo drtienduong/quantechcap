@@ -35,6 +35,13 @@ CONFIG_PATH = Path(os.environ.get("QC_WEB_CONFIG") or HERE / "web_config.json")
 STATIC = HERE / "static"
 STATIC_FILES = {"/static/app.js": "application/javascript; charset=utf-8",
                 "/static/style.css": "text/css; charset=utf-8"}
+KIT_DIR = STATIC / "kit"
+KIT_FILES = {"HUONG_DAN.md", "AI_GUIDE.md", "qc_alpha_api.rs", "alpha_template.rs", "example_ma_cross_bar.rs",
+             "example_tick_range_breakout.rs", "reserved_names.txt", "local_check.rs"}
+MAX_ALPHA_BYTES = 200_000
+SUB_PER_HOUR = 30          # số lần nộp alpha tối đa mỗi giờ / trader
+SUB_MAX_OPEN = 3           # số bản nộp đang chờ kiểm tra cùng lúc / trader
+SUB_STATUSES = ("queued", "checking", "rejected", "pending_review", "approved", "review_rejected", "failed")
 DEFAULTS = {"host": "127.0.0.1", "port": 8800, "desk_token": "", "secure_cookie": False,
             "session_hours": 12, "limits": {}}
 MAX_BODY = 12 * 1024 * 1024
@@ -89,6 +96,8 @@ create table if not exists variants(job_id integer not null, run_id integer not 
 create table if not exists requests(id integer primary key autoincrement, user_id integer not null, job_id integer not null,
   kind text, payload_json text, status text, result_json text, created real);
 create table if not exists meta(k text primary key, v text);
+create table if not exists submissions(id integer primary key autoincrement, user_id integer not null, name text not null,
+  source text, sha256 text, size integer, status text, message text default '', result_json text, created text, updated text);
 """
 
 
@@ -117,6 +126,11 @@ def check_pw(pw: str, stored: str) -> bool:
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def alpha_suffix(slug):
+    """Hậu tố tên alpha của trader: slug đổi '-' thành '_' (desk dùng cùng quy ước và tự kiểm lại)."""
+    return "_" + slug.replace("-", "_")
 
 
 def touch_desk(con):
@@ -205,6 +219,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.login()
             if path.startswith("/api/"):
                 return self.user_api(method, path, q)
+            if path.startswith("/kit/") and method == "GET":
+                return self.kit_file(path[5:])
             if path in STATIC_FILES and method == "GET":
                 return self.send_bytes(200, (STATIC / path.split("/")[-1]).read_bytes(), STATIC_FILES[path])
             if path == "/login" and method == "GET":
@@ -227,6 +243,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(500, "lỗi máy chủ")
             except Exception:
                 pass
+
+    def kit_file(self, name):
+        con = db()
+        try:
+            if not self.session(con):
+                return self.fail(401, "chưa đăng nhập")
+        finally:
+            con.close()
+        if name not in KIT_FILES or not (KIT_DIR / name).is_file():
+            return self.fail(404, "không tìm thấy")
+        ctype = "text/markdown; charset=utf-8" if name.endswith(".md") else "text/plain; charset=utf-8"
+        return self.send_bytes(200, (KIT_DIR / name).read_bytes(), ctype,
+                               [("Content-Disposition", 'attachment; filename="%s"' % name)])
 
     # ---------- đăng nhập ----------
     def login(self):
@@ -281,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["status"]:
                 seen = desk_seen(con)
                 return self.send_json({"ok": True, "email": s["email"], "slug": s["slug"], "csrf": s["csrf"],
+                                       "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
             if parts == ["alphas"]:
@@ -296,6 +326,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "total": total, "jobs": [self.job_row(r) for r in rows]})
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
+            if parts == ["submissions"] and method == "POST":
+                return self.create_submission(con, uid, s["slug"])
+            if parts == ["submissions"] and method == "GET":
+                rows = con.execute("select id,name,sha256,size,status,message,created,updated from submissions "
+                                   "where user_id=? order by id desc limit 50", (uid,)).fetchall()
+                return self.send_json({"ok": True, "submissions": [dict(r) for r in rows]})
+            if len(parts) == 2 and parts[0] == "submissions" and parts[1].isdigit() and method == "GET":
+                r = con.execute("select id,name,sha256,size,status,message,result_json,created,updated from submissions "
+                                "where id=? and user_id=?", (int(parts[1]), uid)).fetchone()
+                if not r:
+                    return self.fail(404, "không có bản nộp")
+                d = dict(r)
+                d["result"] = json.loads(d.pop("result_json") or "null")
+                return self.send_json({"ok": True, "submission": d})
             if len(parts) >= 2 and parts[0] == "jobs" and parts[1].isdigit():
                 return self.job_api(con, uid, int(parts[1]), parts[2:], method, q)
             if len(parts) == 2 and parts[0] == "requests" and parts[1].isdigit() and method == "GET":
@@ -334,6 +378,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": False, "error": "cấu hình không hợp lệ", "details": errs}, 400)
         cur = con.execute("insert into jobs(user_id,type,alpha,config_json,status,created,last_update) values(?,?,?,?,?,?,?)",
                           (uid, clean["type"], clean["alpha"], json.dumps(clean), "queued", now_iso(), time.time()))
+        con.commit()
+        self.send_json({"ok": True, "id": cur.lastrowid})
+
+    def create_submission(self, con, uid, slug):
+        """Trader nộp MÃ NGUỒN alpha. Web chỉ giữ mã tới khi data-server kéo về (rồi xóa). Không biên dịch/chạy gì ở đây."""
+        try:
+            body = self.read_json()
+        except Exception:
+            return self.fail(400, "JSON không hợp lệ")
+        name, src = body.get("name"), body.get("source")
+        suffix = alpha_suffix(slug)
+        if not isinstance(name, str) or not C.NAME_RE.match(name) or not name.endswith(suffix) or name == suffix[1:]:
+            return self.fail(400, f"tên alpha phải dạng <tên>{suffix} (chỉ chữ, số, _ ; tối đa 80 ký tự)")
+        if not isinstance(src, str) or not src.strip():
+            return self.fail(400, "thiếu mã nguồn")
+        raw = src.encode("utf-8")
+        if len(raw) > MAX_ALPHA_BYTES:
+            return self.fail(400, f"file quá lớn (tối đa {MAX_ALPHA_BYTES // 1000} KB)")
+        since = datetime.fromtimestamp(time.time() - 3600, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        n_hour = con.execute("select count(*) from submissions where user_id=? and created >= ?", (uid, since)).fetchone()[0]
+        if n_hour >= SUB_PER_HOUR:
+            return self.fail(429, f"nộp quá {SUB_PER_HOUR} lần trong 1 giờ, thử lại sau")
+        n_open = con.execute("select count(*) from submissions where user_id=? and status in ('queued','checking')",
+                             (uid,)).fetchone()[0]
+        if n_open >= SUB_MAX_OPEN:
+            return self.fail(429, "đang có bản nộp chờ kiểm tra, đợi xong rồi nộp tiếp")
+        cur = con.execute("insert into submissions(user_id,name,source,sha256,size,status,message,created,updated) "
+                          "values(?,?,?,?,?,?,?,?,?)",
+                          (uid, name, src, hashlib.sha256(raw).hexdigest(), len(raw), "queued", "Chờ data-server kiểm tra",
+                           now_iso(), now_iso()))
         con.commit()
         self.send_json({"ok": True, "id": cur.lastrowid})
 
@@ -406,6 +480,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "count": len(items)})
             if len(parts) == 3 and parts[0] == "jobs" and parts[1].isdigit():
                 return self.desk_job(con, int(parts[1]), parts[2], self.read_json())
+            if len(parts) == 3 and parts[0] == "submissions" and parts[1].isdigit() and parts[2] == "update":
+                body = self.read_json()
+                st = body.get("status")
+                if st not in SUB_STATUSES:
+                    return self.fail(400, "status không hợp lệ")
+                res = body.get("result")
+                res_json = json.dumps(res, ensure_ascii=False)[:60000] if res is not None else None
+                con.execute("update submissions set status=?, message=?, result_json=coalesce(?, result_json), updated=? "
+                            "where id=?", (st, str(body.get("message", ""))[:500], res_json, now_iso(), int(parts[1])))
+                con.commit()
+                return self.send_json({"ok": True})
             if len(parts) == 3 and parts[0] == "requests" and parts[1].isdigit() and parts[2] == "result":
                 body = self.read_json()
                 res = body if isinstance(body, dict) else {"ok": False, "error": "kết quả không hợp lệ"}
@@ -419,7 +504,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def desk_poll(self, con, q):
         wait = min(30.0, max(0.0, float(q.get("wait", ["25"])[0])))
-        accept = q.get("accept_jobs", ["1"])[0] == "1"
+        # Hàng job: desk báo loại nó đang nhận được (heavy = optimize, smoke = hàng nhanh riêng).
+        if "accept" in q:
+            lanes = {x for x in q.get("accept", [""])[0].split(",") if x in ("heavy", "smoke")}
+        else:   # desk bản cũ
+            lanes = {"heavy", "smoke"} if q.get("accept_jobs", ["1"])[0] == "1" else set()
+        types = [t for t in C.JOB_TYPES if ("smoke" if t == "smoke" else "heavy") in lanes]
+        accept_sub = q.get("accept_sub", ["0"])[0] == "1"
         end = time.time() + wait
         while True:
             item = None
@@ -431,9 +522,21 @@ class Handler(BaseHTTPRequestHandler):
                     con.commit()
                     item = {"type": "request", "request": {"id": r["id"], "slug": r["slug"], "kind": r["kind"],
                                                            "job_id": r["job_id"], "payload": json.loads(r["payload_json"])}}
-                elif accept:
+                if not item and accept_sub:
+                    sb = con.execute("select s.id, s.name, s.source, s.sha256, u.slug from submissions s "
+                                     "join users u on u.id=s.user_id where s.status='queued' order by s.id limit 1").fetchone()
+                    if sb:
+                        # giao mã cho data-server rồi XÓA khỏi web
+                        con.execute("update submissions set status='checking', source=NULL, "
+                                    "message='Data-server đang kiểm tra', updated=? where id=?", (now_iso(), sb["id"]))
+                        con.commit()
+                        item = {"type": "submission", "submission": {"id": sb["id"], "slug": sb["slug"], "name": sb["name"],
+                                                                     "source": sb["source"], "sha256": sb["sha256"]}}
+                if not item and types:
+                    marks = ",".join("?" * len(types))
                     j = con.execute("select j.id, j.config_json, u.slug from jobs j join users u on u.id=j.user_id "
-                                    "where j.status='queued' order by j.id limit 1").fetchone()
+                                    f"where j.status='queued' and j.type in ({marks}) "
+                                    "order by (j.type='smoke') desc, j.id limit 1", types).fetchone()   # smoke được ưu tiên
                     if j:
                         con.execute("update jobs set status='dispatched', started=?, last_update=? where id=?",
                                     (now_iso(), time.time(), j["id"]))

@@ -67,7 +67,7 @@ function QC_APP() {
   }
   function setNav() {
     const cur = location.hash || "#/";
-    nav.replaceChildren(...[["#/", "Alpha"], ["#/jobs", "Lịch sử chạy"]].map(([href, label]) =>
+    nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"]].map(([href, label]) =>
       h("a", { href, class: (cur === href || (href === "#/jobs" && cur.startsWith("#/job"))) ? "active" : "" }, label)));
   }
   async function route() {
@@ -80,6 +80,7 @@ function QC_APP() {
       if (hash.startsWith("#/run/")) await pageRun(main, decodeURIComponent(hash.slice(6)));
       else if (hash.startsWith("#/job/")) await pageJob(main, parseInt(hash.slice(6), 10));
       else if (hash === "#/jobs") await pageJobs(main);
+      else if (hash === "#/submit") await pageSubmit(main);
       else await pageAlphas(main);
     } catch (e) { if (String(e) !== "Error: 401") main.replaceChildren(h("p", { class: "err" }, "Lỗi: " + e)); }
   }
@@ -94,8 +95,89 @@ async function pageAlphas(main) {
     h("td", { class: "muted" }, a.updated), h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))));
   main.replaceChildren(h("h2", {}, "Alpha của bạn"),
     h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Đồng bộ"), h("th")), rows)
-      : h("p", { class: "muted" }, "Chưa có alpha. Hãy nhờ agent viết alpha trong thư mục alpha của bạn; data-server đồng bộ danh sách mỗi phút.")),
-    h("p", { class: "muted" }, "Mã alpha nằm trên data-server, không đi qua web. Web chỉ gửi cấu hình chạy."));
+      : h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo bộ khung rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), ".")),
+    h("p", { class: "muted" }, "Alpha đã duyệt được lưu và chạy trên data-server. Danh sách đồng bộ mỗi phút."));
+}
+
+/* ---------- nộp alpha ---------- */
+const subLabel = { queued: "chờ kiểm tra", checking: "đang kiểm tra", rejected: "không đạt", pending_review: "chờ duyệt",
+  approved: "đã duyệt", review_rejected: "bị từ chối", failed: "lỗi" };
+const subTag = (s) => h("span", { class: "tag " + ({ approved: "done", rejected: "failed", review_rejected: "failed", failed: "failed",
+  checking: "running", queued: "running" }[s] || "") }, subLabel[s] || s);
+
+async function pageSubmit(main) {
+  const suffix = ST.alpha_suffix;
+  const fileIn = h("input", { type: "file", accept: ".rs" });
+  const nameIn = h("input", { type: "text", size: 50, placeholder: "alpha_y_tuong" + suffix });
+  const info = h("div", {});
+  const listBox = h("div", {});
+  const detail = h("div", {});
+  let srcText = null;
+  fileIn.addEventListener("change", async () => {
+    info.replaceChildren();
+    const f = fileIn.files[0];
+    if (!f) return;
+    if (f.size > 200000) { info.append(h("p", { class: "err" }, "File quá lớn (tối đa 200 KB).")); srcText = null; return; }
+    srcText = await f.text();
+    if (!nameIn.value) nameIn.value = f.name.replace(/\.rs$/i, "");
+    info.append(h("p", { class: "muted" }, `${f.name}: ${f.size} byte, ${srcText.split("\n").length} dòng`));
+  });
+  const btn = h("button", { class: "btn primary", on: { click: async () => {
+    info.replaceChildren();
+    if (!srcText) { info.append(h("p", { class: "err" }, "Chọn file .rs trước.")); return; }
+    const name = nameIn.value.trim();
+    if (!name.endsWith(suffix)) { info.append(h("p", { class: "err" }, `Tên phải kết thúc bằng ${suffix}`)); return; }
+    btn.disabled = true;
+    const j = await api("/api/submissions", { name, source: srcText });
+    btn.disabled = false;
+    if (!j.ok) { info.append(h("p", { class: "err" }, j.error || "Lỗi")); return; }
+    info.append(h("p", { class: "ok" }, `Đã nộp (#${j.id}). Data-server sẽ kiểm tra trong vài giây.`));
+    fileIn.value = ""; srcText = null;
+    await load(); showDetail(j.id);
+  } } }, "Nộp alpha");
+
+  async function showDetail(id) {
+    const r = await api("/api/submissions/" + id);
+    if (!r.ok) { detail.replaceChildren(h("p", { class: "err" }, r.error || "Lỗi")); return; }
+    const sb = r.submission, res = sb.result || {};
+    const errs = [...(res.static_errors || []), ...(res.compile_errors || [])];
+    detail.replaceChildren(h("div", { class: "card" },
+      h("h3", {}, `#${sb.id} · `, h("span", { class: "mono" }, sb.name), " ", subTag(sb.status)),
+      h("p", {}, sb.message || ""),
+      res.params && res.params.length ? h("p", { class: "muted" }, "Tham số: ", h("span", { class: "mono" }, res.params.join(", "))) : null,
+      errs.length ? h("div", {}, h("p", {}, `Lỗi (${errs.length}):`), h("ul", {}, errs.map((e) => h("li", { class: "mono err" }, e)))) : null,
+      h("p", { class: "muted mono" }, `sha256 ${sb.sha256 || ""} · ${sb.size || 0} byte · nộp ${sb.created} UTC`)));
+  }
+
+  async function load() {
+    const r = await api("/api/submissions");
+    const subs = r.submissions || [];
+    listBox.replaceChildren(subs.length ? h("table", {},
+      h("tr", {}, h("th", {}, "#"), h("th", {}, "Tên"), h("th", {}, "Trạng thái"), h("th", {}, "Thông báo"), h("th", {}, "Nộp lúc (UTC)")),
+      subs.map((x) => h("tr", { class: "click", on: { click: () => showDetail(x.id) } },
+        h("td", {}, x.id), h("td", { class: "mono" }, x.name), h("td", {}, subTag(x.status)), h("td", { class: "muted" }, x.message), h("td", { class: "muted" }, x.created))))
+      : h("p", { class: "muted" }, "Chưa nộp alpha nào."));
+    return subs.some((x) => x.status === "queued" || x.status === "checking");
+  }
+
+  main.replaceChildren(
+    h("h2", {}, "Nộp alpha"),
+    h("div", { class: "card" }, h("h3", {}, "1. Bộ khung cho AI của bạn"),
+      h("p", {}, "Tải các file dưới đây, đưa cho AI của bạn (Claude, ChatGPT…) kèm ý tưởng giao dịch. Yêu cầu AI đọc AI_GUIDE.md trước."),
+      h("ul", {}, ST.kit.map((f) => h("li", {}, h("a", { href: "/kit/" + f, download: f, class: "mono" }, f)))),
+      h("p", { class: "muted" }, "Alpha chỉ được tính toán trên dữ liệu engine đưa vào; không đọc file, mạng, dữ liệu ngoài. Vi phạm sẽ bị từ chối tự động.")),
+    h("div", { class: "card" }, h("h3", {}, "2. Nộp mã nguồn (.rs)"),
+      h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, `Tên alpha (kết thúc bằng ${suffix})`, h("br"), nameIn), btn),
+      info,
+      h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về.")),
+    detail,
+    h("div", { class: "card" }, h("h3", {}, "Các lần nộp"), listBox));
+  let pending = await load();
+  timers.push(setInterval(async () => {
+    if (!pending) return;
+    pending = await load().catch(() => false);
+  }, 3000));
+  timers.push(setInterval(async () => { pending = await load().catch(() => pending); }, 15000));
 }
 
 /* ---------- form chạy ---------- */
@@ -143,7 +225,10 @@ async function pageRun(main, name) {
     ticksWrap.style.display = f.type.value === "smoke" ? "" : "none";
   }
   [f.type, ...pRows.flatMap((p) => [p.a, p.s, p.b])].forEach((e) => e.addEventListener("input", refresh));
-  f.type.addEventListener("change", refresh);
+  f.type.addEventListener("change", () => {
+    if (f.type.value === "smoke") { f.from.value = "2023.10.01"; f.to.value = isEnd; setSyms(["EURUSD"]); }
+    refresh();
+  });
 
   const submit = h("button", { class: "btn primary", on: { click: async () => {
     msg.replaceChildren();
@@ -167,7 +252,8 @@ async function pageRun(main, name) {
     h("div", { class: "card" }, h("div", { class: "row" },
       h("label", {}, "Loại job", h("br"), f.type), h("label", {}, "Khung thời gian", h("br"), f.period),
       h("label", {}, "Từ ngày", h("br"), f.from), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to), ticksWrap),
-      h("p", { class: "muted" }, "Job IS bị ép đến ", isEnd, ". OS1/OS2 không chạy được ở bản thử này.")),
+      h("p", { class: "muted" }, "Job IS bị ép đến ", isEnd, ". OS1/OS2 không chạy được ở bản thử này. Smoke: tối đa ",
+        lim.smoke_max_days, " ngày, ", lim.smoke_max_symbols, " symbol, được ưu tiên chạy trước các job optimize đang chờ.")),
     h("div", { class: "card" }, h("h3", {}, "Symbol"), h("div", { class: "row" }, h("label", {}, "Chế độ", h("br"), f.mode),
       h("button", { class: "btn", on: { click: () => setSyms(["EURUSD"]) } }, "Chỉ EURUSD"),
       h("button", { class: "btn", on: { click: () => setSyms(ST.fx25.slice(0, 20)) } }, "20 cặp"),
