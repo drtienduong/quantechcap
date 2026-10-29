@@ -26,6 +26,18 @@ Files in this kit:
   ```
   and one `impl Alpha for YourStruct { fn name(&self) -> &'static str { "..." } ... }`.
 
+### Required timeframe (recommended)
+
+If the logic only makes sense on one bar timeframe (e.g. it checks `bar.period_minutes`, or "first M5 bar of the
+week"), declare it once at the top of the file:
+```rust
+const REQUIRED_PERIOD: &str = "M5";   // one of: M1, M5, M15, M30, H1, H4, D1
+```
+Exactly this form (string literal, declared once). The website then pre-selects this timeframe on the job form and
+warns the trader if another one is chosen. A job run on a different timeframe usually produces ZERO trades, which is
+the most common mistake. Tick-only or timeframe-agnostic alphas should not declare it.
+You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, but always declare REQUIRED_PERIOD too.
+
 ## 2. Parameters
 
 - Declare each parameter as `AlphaInput::new("name", <plain numeric literal>)`, e.g. `AlphaInput::new("period", 20.0)`.
@@ -122,7 +134,7 @@ but simpler: choose different names (e.g. `MyPos`, `TradeSide`).
 
 ## 8. Before submitting
 
-1. The file follows sections 1 to 6.
+1. The file follows sections 1 to 6. If the logic depends on one timeframe, `REQUIRED_PERIOD` is declared.
 2. Optional: run `local_check.rs` (needs Rust installed) to catch type errors.
 3. Upload on the website. The page shows checker errors with line numbers and compile errors from your file only.
    Fix and upload again. After approval, run a Smoke test first (short period, 1 symbol), then Optimize IS.

@@ -95,9 +95,10 @@ function QC_APP() {
 async function pageAlphas(main) {
   const r = await api("/api/alphas");
   const rows = r.alphas.map((a) => h("tr", {}, h("td", { class: "mono" }, a.name), h("td", {}, Object.keys(a.params).length + " tham số"),
+    h("td", {}, (a.meta && a.meta.required_period) ? h("b", {}, a.meta.required_period) : h("span", { class: "muted" }, "tùy chọn")),
     h("td", { class: "muted" }, a.updated), h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))));
   main.replaceChildren(h("h2", {}, "Alpha của bạn"),
-    h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Đồng bộ"), h("th")), rows)
+    h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Khung"), h("th", {}, "Đồng bộ"), h("th")), rows)
       : h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo bộ khung rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), ".")),
     h("p", { class: "muted" }, "Alpha đã duyệt được lưu và chạy trên data-server. Danh sách đồng bộ mỗi phút."));
 }
@@ -196,7 +197,7 @@ async function pageRun(main, name) {
   const f = {
     type: h("select", {}, h("option", { value: "optimize_is" }, "Optimize trên IS"), h("option", { value: "smoke" }, "Smoke test (nhanh, giới hạn tick)")),
     mode: h("select", {}, h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)"), h("option", { value: "independent" }, "Từng symbol riêng")),
-    period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === "H1" }, p))),
+    period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === ((a.meta && a.meta.required_period) || "H1") }, p))),
     from: h("input", { type: "text", value: "2010.01.01", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
     deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:100", size: 7 }),
     swap: h("select", {}, h("option", { value: "zero" }, "zero (không swap)"), h("option", { value: "synthetic" }, "synthetic")),
@@ -209,6 +210,15 @@ async function pageRun(main, name) {
   const pRows = Object.entries(a.params).map(([k, v]) => ({
     k, a: h("input", { type: "number", value: v[0], step: "any" }), s: h("input", { type: "number", value: v[1], step: "any" }), b: h("input", { type: "number", value: v[2], step: "any" }),
   }));
+  const reqP = (a.meta && a.meta.required_period) || null;
+  const periodWarn = h("p", { class: "err", hidden: true });
+  const checkPeriod = () => {
+    const bad = reqP && f.period.value !== reqP;
+    periodWarn.hidden = !bad;
+    periodWarn.textContent = bad ? `Alpha này khai báo khung bắt buộc ${reqP}. Chạy với ${f.period.value} rất có thể ra 0 lệnh.` : "";
+    return !bad;
+  };
+  f.period.addEventListener("change", checkPeriod);
   const cnt = h("b", {});
   const msg = h("div", {});
   const ticksWrap = h("label", {}, "Giới hạn tick (smoke)", h("br"), f.ticks);
@@ -246,6 +256,7 @@ async function pageRun(main, name) {
       leverage: f.leverage.value.trim(), swap_mode: f.swap.value, lot: parseFloat(f.lot.value), point_value_per_lot: parseFloat(f.pv.value),
       commission_per_trade: parseFloat(f.comm.value), max_ticks: f.type.value === "smoke" ? parseInt(f.ticks.value, 10) || 0 : 0, params,
     };
+    if (!checkPeriod() && !confirm(`Alpha yêu cầu khung ${reqP} nhưng bạn chọn ${f.period.value}. Vẫn chạy?`)) return;
     submit.disabled = true;
     const j = await api("/api/jobs", cfg);
     submit.disabled = false;
@@ -256,8 +267,9 @@ async function pageRun(main, name) {
   main.replaceChildren(
     h("h2", {}, "Chạy: ", h("span", { class: "mono" }, name)),
     h("div", { class: "card" }, h("div", { class: "row" },
-      h("label", {}, "Loại job", h("br"), f.type), h("label", {}, "Khung thời gian", h("br"), f.period),
+      h("label", {}, "Loại job", h("br"), f.type), h("label", {}, "Khung thời gian" + (reqP ? ` (alpha yêu cầu ${reqP})` : ""), h("br"), f.period),
       h("label", {}, "Từ ngày", h("br"), f.from), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to), ticksWrap),
+      periodWarn,
       h("p", { class: "muted" }, "Job IS bị ép đến ", isEnd, ". OS1/OS2 không chạy được ở bản thử này. Smoke: tối đa ",
         lim.smoke_max_days, " ngày, ", lim.smoke_max_symbols, " symbol, được ưu tiên chạy trước các job optimize đang chờ.")),
     h("div", { class: "card" }, h("h3", {}, "Symbol"), h("div", { class: "row" }, h("label", {}, "Chế độ", h("br"), f.mode),
@@ -355,7 +367,8 @@ async function pageJob(main, id) {
     const slim = job.status === "done" && job.summary ? h("div", { class: "vwbar" }, h("span", { class: "mono" }, job.alpha), h("span", { class: "mono" }, ver), h("span", {}, `${job.summary.variants} run`)) : null;
     if (job.status === "done" && !viewer) viewer = buildViewer(id, job);
     main.classList.toggle("wide", job.status === "done");
-    holder.replaceChildren(slim || head, job.status === "done" ? viewer : null);
+    const doneNote = job.status === "done" && job.notice ? h("div", { class: "banner warnbox" }, job.notice) : null;
+    holder.replaceChildren(slim || head, doneNote, job.status === "done" ? viewer : null);
     if (!live) clearTimers();
   }
   await render();

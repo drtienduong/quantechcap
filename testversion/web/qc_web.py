@@ -115,6 +115,8 @@ def init_db():
     cols = {r[1] for r in con.execute("pragma table_info(jobs)")}
     if "progress_at" not in cols:
         con.execute("alter table jobs add column progress_at real")
+    if "meta_json" not in {r[1] for r in con.execute("pragma table_info(alphas)")}:
+        con.execute("alter table alphas add column meta_json text")
     con.commit()
     con.close()
 
@@ -191,6 +193,34 @@ def job_notice(con, r):
         off = offline_note(con, "Job")
         if off:
             return "Mất liên lạc với data-server khi job đang chạy. Run có thể vẫn tiếp tục; " + off.split(". ", 1)[1]
+    if st == "done":
+        return zero_trade_notice(con, r)
+    return ""
+
+
+def zero_trade_notice(con, r):
+    """Job xong mà không có lệnh (hoặc phần lớn biến thể không có lệnh): nhắc trader kiểm tra cấu hình."""
+    n, total, zero = con.execute("select count(*), coalesce(sum(trades),0), sum(case when coalesce(trades,0)=0 then 1 else 0 end) "
+                                 "from variants where job_id=?", (r["id"],)).fetchone()
+    if not n:
+        return ""
+    try:
+        cfg = json.loads(con.execute("select config_json from jobs where id=?", (r["id"],)).fetchone()[0])
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    hints = []
+    a = con.execute("select meta_json from alphas where user_id=(select user_id from jobs where id=?) and name=?",
+                    (r["id"], r["alpha"])).fetchone()
+    req = json.loads(a["meta_json"] or "{}").get("required_period") if a else None
+    if req and cfg.get("period") and cfg["period"] != req:
+        hints.append(f"alpha yêu cầu khung {req} nhưng job chạy {cfg['period']}")
+    if total == 0:
+        hints += ["khung thời gian (alpha có lọc theo khung nến không?)",
+                  "chế độ symbol (alpha dùng ..._with_account chỉ giao dịch ở chế độ Portfolio)",
+                  "tham số và khoảng thời gian (điều kiện vào lệnh có bao giờ xảy ra không?)"]
+        return "Job xong nhưng KHÔNG có lệnh nào. Kiểm tra: " + "; ".join(hints) + "."
+    if zero * 2 > n:
+        return f"{zero}/{n} biến thể không có lệnh nào." + (" Lưu ý: " + hints[0] + "." if hints else "")
     return ""
 
 
@@ -410,9 +440,11 @@ class Handler(BaseHTTPRequestHandler):
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
             if parts == ["alphas"]:
-                rows = con.execute("select name, params_json, updated from alphas where user_id=? order by name", (uid,)).fetchall()
+                rows = con.execute("select name, params_json, meta_json, updated from alphas where user_id=? order by name",
+                                   (uid,)).fetchall()
                 return self.send_json({"ok": True, "alphas": [
-                    {"name": r["name"], "params": json.loads(r["params_json"]), "updated": r["updated"]} for r in rows]})
+                    {"name": r["name"], "params": json.loads(r["params_json"]), "meta": json.loads(r["meta_json"] or "{}"),
+                     "updated": r["updated"]} for r in rows]})
             if parts == ["jobs"] and method == "GET":
                 off = max(0, int(q.get("offset", ["0"])[0]))
                 lim = min(100, max(1, int(q.get("limit", ["30"])[0])))
@@ -579,8 +611,10 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("delete from alphas where user_id=?", (u["id"],))
                 for a in items:
                     if isinstance(a.get("name"), str) and C.NAME_RE.match(a["name"]) and isinstance(a.get("params"), dict):
-                        con.execute("insert into alphas(user_id,name,params_json,updated) values(?,?,?,?)",
-                                    (u["id"], a["name"], json.dumps(a["params"]), now_iso()))
+                        m = a.get("meta") if isinstance(a.get("meta"), dict) else {}
+                        meta = {"required_period": m["required_period"]} if m.get("required_period") in C.PERIODS else {}
+                        con.execute("insert into alphas(user_id,name,params_json,meta_json,updated) values(?,?,?,?,?)",
+                                    (u["id"], a["name"], json.dumps(a["params"]), json.dumps(meta), now_iso()))
                 con.commit()
                 return self.send_json({"ok": True, "count": len(items)})
             if len(parts) == 3 and parts[0] == "jobs" and parts[1].isdigit():

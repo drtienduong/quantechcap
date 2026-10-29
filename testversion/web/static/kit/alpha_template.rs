@@ -5,6 +5,10 @@
 
 const MAGIC: u64 = 1; // số nhận diện lệnh của alpha; cùng magic = cùng một vị thế
 
+// Tùy chọn: nếu logic chỉ đúng trên MỘT khung nến, bỏ // ở dòng dưới và đặt khung (M1, M5, M15, M30, H1, H4, D1).
+// Web sẽ chọn sẵn khung này và cảnh báo khi chọn khung khác (chạy sai khung thường ra 0 lệnh).
+// const REQUIRED_PERIOD: &str = "H1";
+
 struct MyAlpha {
     // TODO: tham số
     period: usize,

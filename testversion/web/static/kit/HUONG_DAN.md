@@ -14,6 +14,8 @@
 - Alpha chỉ được tính toán trên dữ liệu engine đưa vào (tick, nến). Không đọc file, không mạng, không dữ liệu ngoài,
   không chạy chương trình khác, không `unsafe`, không biến `static`.
 - Tham số khai báo đúng dạng `AlphaInput::new("tên", số)`. Web đọc danh sách này để dựng form tối ưu.
+- Alpha chỉ đúng trên một khung nến thì khai báo `const REQUIRED_PERIOD: &str = "M5";`. Web chọn sẵn khung đó và
+  cảnh báo nếu bạn chọn khung khác. Chạy sai khung thường ra 0 lệnh.
 - SL/TP là giá tuyệt đối và phải nằm đúng phía giá hiện tại; sai là run bị dừng.
 - Dữ liệu chạy được: các cặp FX, giai đoạn IS (đến 2024-01-01).
 

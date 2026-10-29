@@ -55,6 +55,7 @@ sub_busy = threading.Event()     # đang kiểm tra một bản nộp alpha
 _jobs_lock = threading.Lock()
 _catalog = {}   # slug -> {alpha_name: params}
 _cat_hash = {}
+_meta = {}      # slug -> {alpha_name: {"required_period": "M5"}}
 
 
 def log(*a):
@@ -90,12 +91,18 @@ def alpha_params(cli_alpha_path: Path):
 def scan_alphas(slug):
     t = TRADERS[slug]
     suffix = "_" + t["name"]
-    res = {}
+    res, meta = {}, {}
     for p in sorted((t["dir"] / "alpha").glob("*.rs")):
         if p.stem.endswith(suffix) and C.NAME_RE.match(p.stem):
             params = alpha_params(p)
             if params:
                 res[p.stem] = params
+                try:
+                    rp = AC.required_period(p.read_text(encoding="utf-8", errors="replace"))
+                except Exception:  # noqa: BLE001
+                    rp = None
+                meta[p.stem] = {"required_period": rp} if rp else {}
+    _meta[slug] = meta
     return res
 
 
@@ -107,9 +114,11 @@ def sync_catalog(force=False):
             log("scan alpha lỗi", slug, repr(e))
             continue
         _catalog[slug] = cat
-        h = hashlib.sha1(json.dumps(cat, sort_keys=True).encode()).hexdigest()
+        meta = _meta.get(slug, {})
+        h = hashlib.sha1(json.dumps([cat, meta], sort_keys=True).encode()).hexdigest()
         if force or _cat_hash.get(slug) != h:
-            api("POST", "/api/desk/alphas", {"slug": slug, "alphas": [{"name": n, "params": p} for n, p in cat.items()]})
+            api("POST", "/api/desk/alphas", {"slug": slug, "alphas": [{"name": n, "params": p, "meta": meta.get(n, {})}
+                                                                       for n, p in cat.items()]})
             _cat_hash[slug] = h
             log(f"đồng bộ {len(cat)} alpha cho {slug}")
 

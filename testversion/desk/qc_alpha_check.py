@@ -27,6 +27,14 @@ DEFAULT_TEMPLATE = Path(r"C:\Users\zicza\Documents\rust-quant\backtest-optimzie-
 MAX_BYTES = 200_000
 MAX_LINES = 5_000
 MAX_PARAMS = 64
+PERIODS = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+REQUIRED_PERIOD_RE = re.compile(r'const\s+REQUIRED_PERIOD\s*:\s*&\s*(?:\'static\s+)?str\s*=\s*"([^"]*)"\s*;')
+
+
+def required_period(src):
+    """Khung bắt buộc alpha tự khai báo (const REQUIRED_PERIOD: &str = "M5";), None nếu không khai báo."""
+    found = REQUIRED_PERIOD_RE.findall(strip_comments(src))
+    return found[0] if len(found) == 1 and found[0] in PERIODS else None
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
 
 API_NAMES = {"Tick", "Bar", "AccountView", "OrderSide", "Signal", "AlphaInput", "ParameterSet", "Alpha", "HashMap", "HashSet"}
@@ -293,7 +301,7 @@ def strip_comments(src):
 
 def static_check(src, reserved):
     """Trả về (errors, info). errors: danh sách chuỗi 'dòng N: lý do'."""
-    errors, info = [], {"params": [], "name": None}
+    errors, info = [], {"params": [], "name": None, "required_period": None}
 
     def err(line, msg):
         if len(errors) < 50:
@@ -464,6 +472,14 @@ def static_check(src, reserved):
     if len(params) > MAX_PARAMS:
         err(0, f"quá nhiều tham số ({len(params)} > {MAX_PARAMS})")
     info["params"] = [p[0] for p in params]
+    rp = REQUIRED_PERIOD_RE.findall(code)
+    if len(rp) > 1:
+        err(0, "REQUIRED_PERIOD chỉ được khai báo một lần")
+    elif rp and rp[0] not in PERIODS:
+        err(0, f"REQUIRED_PERIOD = {rp[0]!r} không hợp lệ (chỉ: {', '.join(PERIODS)})")
+    elif "REQUIRED_PERIOD" in code and not rp:
+        err(0, 'khai báo khung bắt buộc đúng dạng: const REQUIRED_PERIOD: &str = "M5";')
+    info["required_period"] = rp[0] if len(rp) == 1 and rp[0] in PERIODS else None
     m = re.search(r'fn\s+name\s*\(\s*&\s*self\s*\)\s*->\s*&\s*\'static\s+str\s*\{\s*"([^"]*)"', src)
     info["name"] = m.group(1) if m else None
     if not m:
@@ -529,6 +545,7 @@ def check(src, template_path=DEFAULT_TEMPLATE, do_compile=True):
     tpl = Path(template_path).read_text(encoding="utf-8")
     errs, info = static_check(src, engine_reserved_names(tpl))
     res = {"static_ok": not errs, "static_errors": errs, "params": info["params"], "fn_name": info["name"],
+           "required_period": info.get("required_period"),
            "compile_ok": None, "compile_errors": []}
     if errs or not do_compile:
         return res
