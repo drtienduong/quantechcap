@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -204,8 +205,65 @@ def collect_variants(run_dir: Path):
     return out
 
 
+RUN_WAIT_MAX_MIN = 240          # chờ run khác (của web hoặc ngoài web) tối đa 4 giờ
+START_RETRIES = 4               # số lần thử khởi động lại khi tiến trình run thoát sớm
+STALL_WARN_MIN = 30             # không thấy tiến độ mới quá 30 phút -> ghi chú cho trader
+_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"]+")
+
+
+def rq_runs_active():
+    """PID các run rq_run đang chạy trên máy (của web, agent hay alpha-lab). Chúng giữ giới hạn CPU dùng chung,
+    run mới không vào được cho tới khi chúng xong."""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+                            "Where-Object { $_.CommandLine -match 'rq_run\\.py' -and $_.CommandLine -match '--child' } | "
+                            "ForEach-Object { $_.ProcessId }"],
+                           capture_output=True, text=True, timeout=60, creationflags=0x08000000 if os.name == "nt" else 0)
+        return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def nice_progress(txt):
+    """'12.3% elapsed=5m eta=30m EURUSD' -> câu tiếng Việt cho trader."""
+    m = re.match(r"([\d.]+)% elapsed=(-?\d+)m eta=(-?\d+)m\s*(.*)", txt or "")
+    if not m:
+        return "Đang chạy"
+    pct, el, eta, sym = m.groups()
+    out = f"Đang chạy {float(pct):.1f}% · đã chạy {el} phút"
+    if int(eta) >= 0:
+        out += f" · còn khoảng {eta} phút"
+    if sym.strip():
+        out += f" · {sym.strip()[:20]}"
+    return out
+
+
+def engine_error_message(st, timeout_min):
+    """Đọc cuối log của run, đưa ra lý do dễ hiểu + việc trader cần làm. Không lộ đường dẫn data-server."""
+    tail = []
+    try:
+        lines = Path(st.get("log", "")).read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = [ln.strip() for ln in lines[-80:] if ln.strip() and not ln.startswith(("PROGRESS", "SYMBOL_"))]
+    except Exception:  # noqa: BLE001
+        pass
+    if any("TIMEOUT_KILL" in ln for ln in tail):
+        return (f"Run vượt giới hạn thời gian ({timeout_min:g} phút) nên đã bị dừng. "
+                "Hãy thu hẹp khoảng thời gian, số symbol hoặc số biến thể rồi chạy lại.")
+    keys = ("must", "invalid", "panicked", "error", "Error", "failed", "missing", "not found")
+    generic = ("runner failed with exit code", "helper failed with status", "optimizer helper failed")
+    hits = [ln for ln in tail if any(k in ln for k in keys) and not ln.lstrip().startswith(("File \"", "Traceback"))
+            and not any(g in ln for g in generic)]
+    if hits:
+        reason = _PATH_RE.sub("<đường dẫn>", hits[-1])[:260]
+        return (f"Engine dừng vì lỗi: {reason}. Thường do alpha (SL/TP sai phía giá, panic, chia cho 0…) hoặc cấu hình. "
+                "Sửa rồi chạy lại; nếu không rõ nguyên nhân, báo quản trị kèm số job.")
+    return (f"Engine dừng bất thường (mã {st.get('exit_code')}). Hãy chạy lại; nếu lặp lại, báo quản trị kèm số job.")
+
+
 def run_job(job):
     jid, slug = job["id"], job["slug"]
+    lane = smoke_busy if job.get("config", {}).get("type") == "smoke" else heavy_busy
 
     def fail(msg):
         log(f"job {jid} lỗi: {msg}")
@@ -214,7 +272,7 @@ def run_job(job):
     try:
         t = TRADERS.get(slug)
         if not t:
-            return fail("trader không có trong cấu hình data-server")
+            return fail("Tài khoản của bạn chưa được cấu hình trên data-server. Báo quản trị.")
         cfg = job["config"]
         alpha = cfg.get("alpha", "")
         cat = _catalog.get(slug, {}).get(alpha)
@@ -222,14 +280,14 @@ def run_job(job):
             sync_catalog()
             cat = _catalog.get(slug, {}).get(alpha)
         if cat is None:
-            return fail("alpha không có trong thư mục alpha của trader")
+            return fail("Alpha không còn trên data-server. Kiểm tra trang Alpha hoặc nộp lại alpha.")
         clean_cfg, errs = C.validate_job(cfg, cat, LIMITS)     # KHÔNG tin web
         if errs:
-            return fail("cấu hình bị data-server từ chối: " + "; ".join(errs))
+            return fail("Cấu hình bị data-server từ chối: " + "; ".join(errs) + ". Sửa cấu hình rồi gửi lại.")
         alpha_file = alpha + ".rs"
         alpha_path = (t["dir"] / "alpha" / alpha_file).resolve()
         if t["dir"] not in alpha_path.parents or not alpha_path.is_file():
-            return fail("đường dẫn alpha không hợp lệ")
+            return fail("Alpha không còn trên data-server. Kiểm tra trang Alpha hoặc nộp lại alpha.")
         jdir = t["dir"] / "work" / "jobs" / f"job_{jid}"
         jdir.mkdir(parents=True, exist_ok=True)
         ini = jdir / "input-optimize.ini"
@@ -238,82 +296,168 @@ def run_job(job):
         cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
                "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
         smoke = clean_cfg["type"] == "smoke"
+        timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
         if smoke:
             cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
-        upd(jid, status="running", message="Bắt đầu chạy trên data-server", progress=0)
+        upd(jid, status="running", message="Data-server đã nhận job, đang chuẩn bị chạy", progress=0)
 
-        run_id = status_path = None
-        for attempt in range(60):      # rq_run chỉ cho 1 run nặng một lúc -> chờ nếu bận (tối đa ~20 phút)
-            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-            out = (r.stdout or "") + (r.stderr or "")
-            m = re.search(r"STARTED run_id=(\S+) status=(.+)", out)
-            if m:
-                run_id, status_path = m.group(1), Path(m.group(2).strip())
-                break
-            if "BUSY" in out:
-                resp = upd(jid, message=f"Data-server đang bận run khác, chờ… ({attempt + 1})")
-                if resp.get("cancel"):
-                    return upd(jid, status="cancelled", message="Đã hủy")
-                time.sleep(20)
-                continue
-            return fail("rq_run từ chối: " + out.strip()[-400:])
-        if not run_id:
-            return fail("hết thời gian chờ data-server rảnh")
-
-        t0 = time.time()
-        last = 0
-        for _ in range(240):           # chờ file trạng thái xuất hiện (tối đa 2 phút)
-            if status_path.exists():
-                break
-            time.sleep(0.5)
-        if not status_path.exists():
-            return fail("run không khởi động được trên data-server (tiến trình chạy thoát sớm). Thử lại sau.")
-        st = {}
-        dead_since = None
-        while True:
-            time.sleep(2)
-            try:
-                st = json.loads(status_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if st.get("state") in ("done", "failed"):
-                break
-            # tiến trình run chết mà không kịp ghi trạng thái -> báo lỗi thay vì chờ mãi
-            if st.get("pid") and not pid_alive(st["pid"]):
-                dead_since = dead_since or time.time()
-                if time.time() - dead_since > 20:
-                    return fail("tiến trình run trên data-server dừng bất thường")
-            else:
-                dead_since = None
-            if time.time() - last >= 8:
-                last = time.time()
-                pct, txt = read_progress(run_id)
-                resp = upd(jid, progress=pct or 0, message=(txt or "Đang chạy")[:200])
-                if resp.get("cancel"):
-                    pid = st.get("pid")
-                    if pid:
-                        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
-                    return upd(jid, status="cancelled", message="Đã hủy theo yêu cầu")
-        if st.get("state") != "done":
-            return fail(f"engine báo lỗi (exit {st.get('exit_code')}); xem log: {st.get('log', '')}")
-        run_dir = Path(st["run_dir"]).resolve()
-        if t["dir"] not in run_dir.parents:
-            return fail("thư mục kết quả nằm ngoài workspace của trader")
-        variants = collect_variants(run_dir)
-        jobs_save(jid, slug, run_dir)
-        n_pass = sum(1 for v in variants if v["is_pass"])
-        summary = {"variants": len(variants), "is_pass": n_pass, "minutes": round((time.time() - t0) / 60, 1),
-                   "report": str(run_dir.relative_to(t["dir"]))}
-        for i in range(0, len(variants), 400):
-            last_batch = i + 400 >= len(variants)
-            api("POST", f"/api/desk/jobs/{jid}/result", {"variants": variants[i:i + 400], "final": last_batch, "summary": summary}, timeout=120)
-        if not variants:
-            api("POST", f"/api/desk/jobs/{jid}/result", {"variants": [], "final": True, "summary": summary})
-        log(f"job {jid} xong: {len(variants)} biến thể, {n_pass} pass IS")
+        status_path, t_wait, starts = None, time.time(), 0
+        while status_path is None:
+            waited = (time.time() - t_wait) / 60
+            if waited > RUN_WAIT_MAX_MIN:
+                return fail(f"Data-server bận quá {RUN_WAIT_MAX_MIN} phút nên job chưa chạy được. Hãy gửi lại sau.")
+            others = rq_runs_active()
+            out = ""
+            if not others:
+                r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+                out = (r.stdout or "") + (r.stderr or "")
+                m = re.search(r"STARTED run_id=(\S+) status=(.+)", out)
+                if m:
+                    sp = Path(m.group(2).strip())
+                    for _ in range(120):           # chờ file trạng thái (tối đa 60 giây)
+                        if sp.exists():
+                            break
+                        time.sleep(0.5)
+                    if sp.exists():
+                        status_path = sp
+                        break
+                    starts += 1                    # tiến trình run thoát sớm (thường do run khác vừa chen vào)
+                    log(f"job {jid}: run thoát sớm (lần {starts})")
+                    if starts >= START_RETRIES:
+                        return fail("Data-server không khởi động được run sau nhiều lần thử. "
+                                    "Hãy chạy lại sau ít phút; nếu vẫn lỗi, báo quản trị kèm số job.")
+                    continue
+                if "BUSY" not in out:
+                    return fail("Data-server từ chối chạy: " + _PATH_RE.sub("<đường dẫn>", out.strip()[-300:]))
+            resp = upd(jid, message=f"Data-server đang chạy một run khác; job của bạn sẽ tự bắt đầu khi run đó xong "
+                                    f"(đã chờ {waited:.0f} phút)")
+            if resp.get("cancel"):
+                return upd(jid, status="cancelled", message="Đã hủy trước khi chạy")
+            time.sleep(20)
+        monitor_job(jid, slug, t, status_path, time.time(), timeout_min)
     except Exception as e:  # noqa: BLE001
-        fail(repr(e))
+        fail("Lỗi phía data-server: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:300] + ". Hãy chạy lại; nếu lặp lại, báo quản trị.")
     finally:
-        (smoke_busy if job.get("config", {}).get("type") == "smoke" else heavy_busy).clear()
+        lane.clear()
+
+
+def monitor_job(jid, slug, t, status_path, t0, timeout_min):
+    """Theo dõi một run đến khi xong; dùng cả khi desk khởi động lại và nhận lại job đang chạy."""
+    def fail(msg):
+        log(f"job {jid} lỗi: {msg}")
+        upd(jid, status="failed", message=str(msg)[:480])
+
+    run_id = status_path.stem
+    last, dead_since, last_pct, pct_at = 0.0, None, None, time.time()
+    st = {}
+    while True:
+        time.sleep(2)
+        try:
+            st = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if st.get("state") in ("done", "failed"):
+            break
+        if st.get("pid") and not pid_alive(st["pid"]):
+            dead_since = dead_since or time.time()
+            if time.time() - dead_since > 20:
+                return fail("Run dừng giữa chừng trên data-server (tiến trình bị tắt). Hãy bấm \"Chạy lại job này\".")
+        else:
+            dead_since = None
+        if time.time() - last >= 8:
+            last = time.time()
+            pct, txt = read_progress(run_id)
+            if pct != last_pct:
+                last_pct, pct_at = pct, time.time()
+            msg = nice_progress(txt)
+            stall = (time.time() - pct_at) / 60
+            if stall >= STALL_WARN_MIN:
+                msg += f" · chưa có tiến độ mới trong {stall:.0f} phút (run sẽ tự dừng nếu quá {timeout_min:g} phút)"
+            resp = upd(jid, progress=pct or 0, message=msg[:300])
+            if resp.get("cancel"):
+                pid = st.get("pid")
+                if pid:
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+                return upd(jid, status="cancelled", message="Đã hủy theo yêu cầu")
+    if st.get("state") != "done":
+        return fail(engine_error_message(st, timeout_min))
+    finish_job(jid, slug, t, st, t0)
+
+
+def finish_job(jid, slug, t, st, t0):
+    run_dir = Path(st["run_dir"]).resolve()
+    if t["dir"] not in run_dir.parents:
+        log(f"job {jid}: thư mục kết quả ngoài workspace trader")
+        return upd(jid, status="failed", message="Kết quả nằm sai chỗ trên data-server. Báo quản trị kèm số job.")
+    upd(jid, message="Run xong, đang gửi kết quả lên web")
+    variants = collect_variants(run_dir)
+    jobs_save(jid, slug, run_dir)
+    n_pass = sum(1 for v in variants if v["is_pass"])
+    summary = {"variants": len(variants), "is_pass": n_pass, "minutes": round((time.time() - t0) / 60, 1),
+               "report": str(run_dir.relative_to(t["dir"]))}
+    for i in range(0, len(variants), 400):
+        last_batch = i + 400 >= len(variants)
+        api("POST", f"/api/desk/jobs/{jid}/result", {"variants": variants[i:i + 400], "final": last_batch, "summary": summary}, timeout=120)
+    if not variants:
+        api("POST", f"/api/desk/jobs/{jid}/result", {"variants": [], "final": True, "summary": summary})
+    log(f"job {jid} xong: {len(variants)} biến thể, {n_pass} pass IS")
+
+
+def find_run_status(t, jid):
+    """File trạng thái rq_run mới nhất của job web<jid> trong lab/runs của trader."""
+    best = None
+    for p in (t["dir"] / "lab" / "runs").glob("*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if d.get("tag") == f"web{jid}" and (best is None or p.stat().st_mtime > best[0].stat().st_mtime):
+            best = (p, d)
+    return best
+
+
+def recover_jobs():
+    """Desk vừa khởi động: nhận lại các job web đang dở (run còn chạy thì theo dõi tiếp, xong rồi thì gửi kết quả)."""
+    try:
+        items = api("GET", "/api/desk/active", timeout=30).get("jobs", [])
+    except Exception as e:  # noqa: BLE001
+        log("không lấy được danh sách job dở:", repr(e))
+        return
+    for j in items:
+        jid, slug = j["id"], j["slug"]
+        t = TRADERS.get(slug)
+        smoke = j.get("config", {}).get("type") == "smoke"
+        timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
+        found = find_run_status(t, jid) if t else None
+        if not found:
+            log(f"nhận lại job {jid}: không có run -> lỗi")
+            upd(jid, status="failed", message="Data-server khởi động lại trước khi job bắt đầu chạy. Hãy bấm \"Chạy lại job này\".")
+            continue
+        sp, st = found
+        try:
+            t0 = datetime.fromisoformat(st.get("started", "")).timestamp()
+        except ValueError:
+            t0 = time.time()
+        if st.get("state") == "done":
+            log(f"nhận lại job {jid}: run đã xong -> gửi kết quả")
+            threading.Thread(target=finish_job, args=(jid, slug, t, st, t0), daemon=True).start()
+        elif st.get("state") == "running" and st.get("pid") and pid_alive(st["pid"]):
+            log(f"nhận lại job {jid}: run vẫn chạy -> theo dõi tiếp")
+            lane = smoke_busy if smoke else heavy_busy
+            lane.set()
+            upd(jid, message="Data-server vừa khởi động lại, đã nhận lại job đang chạy")
+
+            def _mon(jid=jid, slug=slug, t=t, sp=sp, t0=t0, tm=timeout_min, lane=lane):
+                try:
+                    monitor_job(jid, slug, t, sp, t0, tm)
+                finally:
+                    lane.clear()
+            threading.Thread(target=_mon, daemon=True).start()
+        elif st.get("state") == "failed":
+            upd(jid, status="failed", message=engine_error_message(st, timeout_min))
+        else:
+            log(f"nhận lại job {jid}: run đã chết -> lỗi")
+            upd(jid, status="failed", message="Run dừng giữa chừng khi data-server khởi động lại. Hãy bấm \"Chạy lại job này\".")
 
 
 # ---------- nộp alpha: cách ly -> kiểm tra -> duyệt -> cài ----------
@@ -468,6 +612,7 @@ def handle_request(req):
 def main():
     log(f"desk chạy; web={WEB}; trader={list(TRADERS)}; data={DATA_FOLDER}")
     threading.Thread(target=catalog_loop, daemon=True).start()
+    recover_jobs()
     backoff = 3
     while True:
         try:

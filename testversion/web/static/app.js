@@ -55,14 +55,17 @@ function QC_APP() {
   const main = h("main");
   const deskBadge = h("span", { class: "badge" }, "data-server: ?");
   const nav = h("div", { id: "nav" });
+  const banner = h("div", { class: "banner", hidden: true });
   root.append(h("header", {}, h("span", { class: "brand" }, "QuanTechCap"), nav, h("span", { class: "sp" }), deskBadge,
-    h("span", { id: "who" }), h("button", { class: "btn", on: { click: async () => { await api("/api/logout", {}); location.href = "/login"; } } }, "Đăng xuất")), main);
+    h("span", { id: "who" }), h("button", { class: "btn", on: { click: async () => { await api("/api/logout", {}); location.href = "/login"; } } }, "Đăng xuất")), banner, main);
 
   async function refreshStatus() {
     const s = await api("/api/status");
     ST = s;
     deskBadge.textContent = s.desk_online ? "data-server: online" : "data-server: offline";
     deskBadge.className = "badge " + (s.desk_online ? "on" : "off");
+    banner.textContent = s.desk_notice || "";
+    banner.hidden = !s.desk_notice;
     document.getElementById("who").textContent = s.email;
   }
   function setNav() {
@@ -155,7 +158,9 @@ async function pageSubmit(main) {
     listBox.replaceChildren(subs.length ? h("table", {},
       h("tr", {}, h("th", {}, "#"), h("th", {}, "Tên"), h("th", {}, "Trạng thái"), h("th", {}, "Thông báo"), h("th", {}, "Nộp lúc (UTC)")),
       subs.map((x) => h("tr", { class: "click", on: { click: () => showDetail(x.id) } },
-        h("td", {}, x.id), h("td", { class: "mono" }, x.name), h("td", {}, subTag(x.status)), h("td", { class: "muted" }, x.message), h("td", { class: "muted" }, x.created))))
+        h("td", {}, x.id), h("td", { class: "mono" }, x.name), h("td", {}, subTag(x.status)),
+        h("td", { class: x.notice ? "warn" : (x.status === "failed" || x.status === "rejected" || x.status === "review_rejected" ? "err" : "muted") }, x.notice || x.message),
+        h("td", { class: "muted" }, x.created))))
       : h("p", { class: "muted" }, "Chưa nộp alpha nào."));
     return subs.some((x) => x.status === "queued" || x.status === "checking");
   }
@@ -281,10 +286,12 @@ async function pageJobs(main) {
   async function load() {
     const r = await api("/api/jobs?limit=50");
     main.replaceChildren(h("h2", {}, "Lịch sử chạy"), h("div", { class: "card" }, r.jobs.length ? h("table", {},
-      h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Tạo lúc (UTC)")),
+      h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
       r.jobs.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
         h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", {}, tag(j.status)),
-        h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")), h("td", { class: "muted" }, j.created)))
+        h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")),
+        h("td", { class: j.status === "failed" ? "err small" : (j.notice ? "warn small" : "muted small") }, j.notice || (j.status === "done" ? "" : j.message || "")),
+        h("td", { class: "muted" }, j.created)))
     ) : h("p", { class: "muted" }, "Chưa có job.")));
   }
   await load();
@@ -332,7 +339,14 @@ async function pageJob(main, id) {
     const head = h("div", { class: "card" },
       h("h2", {}, `Job #${job.id} · `, h("span", { class: "mono" }, job.alpha), " ", tag(job.status)),
       live ? h("div", { class: "bar" }, (() => { const i = h("i"); i.style.width = Math.max(2, job.progress || 0) + "%"; return i; })()) : null,
-      h("p", { class: "muted" }, job.message || ""),
+      job.notice ? h("p", { class: "warn" }, job.notice) : null,
+      h("p", { class: job.status === "failed" ? "err" : "muted" }, job.message || ""),
+      (job.status === "failed" || job.status === "cancelled") ? h("button", { class: "btn primary", on: { click: async (ev) => {
+        ev.target.disabled = true;
+        const r = await api("/api/jobs", c);
+        if (r.ok) location.hash = "#/job/" + r.id;
+        else { ev.target.disabled = false; alert((r.error || "Lỗi") + (r.details ? "\n" + r.details.join("\n") : "")); }
+      } } }, "Chạy lại job này") : null,
       h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate} · swap ${c.swap_mode} · ${c.variants} biến thể`),
       h("p", { class: "mono muted" }, Object.entries(c.params).filter(([, v]) => v[1] > 0).map(([k, v]) => `${k}: ${v[0]}→${v[2]} step ${v[1]}`).join("  |  ") || "(không có lưới)"),
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,

@@ -45,6 +45,11 @@ MAX_ALPHA_BYTES = 200_000
 SUB_PER_HOUR = 30          # số lần nộp alpha tối đa mỗi giờ / trader
 SUB_MAX_OPEN = 3           # số bản nộp đang chờ kiểm tra cùng lúc / trader
 SUB_STATUSES = ("queued", "checking", "rejected", "pending_review", "approved", "review_rejected", "failed")
+# Giám sát vận hành (web tự phát hiện việc bị kẹt và báo cho trader)
+SWEEP_SEC = int(os.environ.get("QC_SWEEP_SEC", 30))
+SUB_CHECK_STALE_SEC = int(os.environ.get("QC_SUB_STALE_SEC", 180))   # bản nộp "đang kiểm tra" quá 3 phút -> lỗi, nộp lại
+JOB_STALE_SEC = int(os.environ.get("QC_JOB_STALE_SEC", 300))         # job không có cập nhật 5 phút khi data-server online -> lỗi
+DESK_STABLE_SEC = int(os.environ.get("QC_DESK_STABLE_SEC", 120))     # data-server online liên tục 2 phút mới xét mất theo dõi
 DEFAULTS = {"host": "127.0.0.1", "port": 8800, "desk_token": "", "secure_cookie": False,
             "session_hours": 12, "limits": {}}
 MAX_BODY = 12 * 1024 * 1024
@@ -107,6 +112,9 @@ create table if not exists submissions(id integer primary key autoincrement, use
 def init_db():
     con = db()
     con.executescript(SCHEMA)
+    cols = {r[1] for r in con.execute("pragma table_info(jobs)")}
+    if "progress_at" not in cols:
+        con.execute("alter table jobs add column progress_at real")
     con.commit()
     con.close()
 
@@ -137,8 +145,83 @@ def alpha_suffix(slug):
 
 
 def touch_desk(con):
-    con.execute("insert into meta(k,v) values('desk_seen',?) on conflict(k) do update set v=excluded.v", (str(time.time()),))
+    now = time.time()
+    if now - desk_seen(con) > DESK_ONLINE_SEC:      # vừa online trở lại
+        con.execute("insert into meta(k,v) values('desk_online_since',?) on conflict(k) do update set v=excluded.v", (str(now),))
+    con.execute("insert into meta(k,v) values('desk_seen',?) on conflict(k) do update set v=excluded.v", (str(now),))
     con.commit()
+
+
+def meta_f(con, k):
+    r = con.execute("select v from meta where k=?", (k,)).fetchone()
+    return float(r["v"]) if r else 0.0
+
+
+def utc_hm(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%M %d/%m") if ts else "?"
+
+
+def desk_state(con):
+    seen = desk_seen(con)
+    return {"online": time.time() - seen < DESK_ONLINE_SEC, "seen": seen}
+
+
+def offline_note(con, what):
+    d = desk_state(con)
+    if d["online"]:
+        return ""
+    return (f"Data-server đang offline (liên lạc lần cuối {utc_hm(d['seen'])} UTC). "
+            f"{what} sẽ được xử lý tự động khi data-server hoạt động lại, bạn không cần gửi lại.")
+
+
+def job_notice(con, r):
+    """Thông báo vận hành cho trader về một job (không lộ thông tin của trader khác, chỉ số đếm)."""
+    st = r["status"]
+    if st == "queued":
+        off = offline_note(con, "Job")
+        if off:
+            return off
+        smoke = 1 if r["type"] == "smoke" else 0
+        ahead = con.execute("select count(*) from jobs where status='queued' and "
+                            "((type='smoke') > ? or ((type='smoke') = ? and id < ?))", (smoke, smoke, r["id"])).fetchone()[0]
+        busy = con.execute("select count(*) from jobs where status in ('dispatched','running')").fetchone()[0]
+        n = ahead + busy
+        return ("Đang chờ: data-server đang chạy job khác, trước job này còn " + str(n) + " job.") if n else "Đang chờ data-server nhận job."
+    if st in ("dispatched", "running"):
+        off = offline_note(con, "Job")
+        if off:
+            return "Mất liên lạc với data-server khi job đang chạy. Run có thể vẫn tiếp tục; " + off.split(". ", 1)[1]
+    return ""
+
+
+def sweep_once():
+    """Phát hiện việc bị kẹt, chuyển sang trạng thái lỗi kèm hướng dẫn cho trader."""
+    con = db()
+    try:
+        now = time.time()
+        cutoff = datetime.fromtimestamp(now - SUB_CHECK_STALE_SEC, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        con.execute("update submissions set status='failed', updated=?, message=? where status='checking' and updated < ?",
+                    (now_iso(), "Data-server không trả kết quả kiểm tra (có thể vừa khởi động lại). Mã đã được xóa khỏi web, "
+                                "hãy nộp lại file.", cutoff))
+        d = desk_state(con)
+        stable = d["online"] and now - meta_f(con, "desk_online_since") > DESK_STABLE_SEC
+        if stable:
+            con.execute("update jobs set status='failed', finished=?, message=? where status in ('dispatched','running') "
+                        "and coalesce(last_update, 0) < ?",
+                        (now_iso(), "Data-server mất theo dõi job này (có thể vừa khởi động lại hoặc run bị dừng). "
+                                    "Hãy bấm \"Chạy lại job này\".", now - JOB_STALE_SEC))
+        con.commit()
+    finally:
+        con.close()
+
+
+def sweeper():
+    while True:
+        try:
+            sweep_once()
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"lỗi sweeper: {e!r}\n")
+        time.sleep(SWEEP_SEC)
 
 
 def desk_seen(con):
@@ -322,6 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["status"]:
                 seen = desk_seen(con)
                 return self.send_json({"ok": True, "email": s["email"], "slug": s["slug"], "csrf": s["csrf"],
+                                       "desk_notice": offline_note(con, "Job và bản nộp alpha"),
                                        "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
@@ -335,7 +419,8 @@ class Handler(BaseHTTPRequestHandler):
                 rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json from jobs "
                                    "where user_id=? order by id desc limit ? offset ?", (uid, lim, off)).fetchall()
                 total = con.execute("select count(*) from jobs where user_id=?", (uid,)).fetchone()[0]
-                return self.send_json({"ok": True, "total": total, "jobs": [self.job_row(r) for r in rows]})
+                return self.send_json({"ok": True, "total": total,
+                                       "jobs": [dict(self.job_row(r), notice=job_notice(con, r)) for r in rows]})
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
             if parts == ["submissions"] and method == "POST":
@@ -343,7 +428,9 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["submissions"] and method == "GET":
                 rows = con.execute("select id,name,sha256,size,status,message,created,updated from submissions "
                                    "where user_id=? order by id desc limit 50", (uid,)).fetchall()
-                return self.send_json({"ok": True, "submissions": [dict(r) for r in rows]})
+                note = offline_note(con, "Bản nộp")
+                return self.send_json({"ok": True, "submissions": [
+                    dict(r, notice=note if r["status"] == "queued" else "") for r in rows]})
             if len(parts) == 2 and parts[0] == "submissions" and parts[1].isdigit() and method == "GET":
                 r = con.execute("select id,name,sha256,size,status,message,result_json,created,updated from submissions "
                                 "where id=? and user_id=?", (int(parts[1]), uid)).fetchone()
@@ -430,6 +517,7 @@ class Handler(BaseHTTPRequestHandler):
         if not rest and method == "GET":
             d = self.job_row(j)
             d["config"] = json.loads(j["config_json"])
+            d["notice"] = job_notice(con, j)
             return self.send_json({"ok": True, "job": d})
         if rest == ["cancel"] and method == "POST":
             if j["status"] == "queued":
@@ -477,6 +565,11 @@ class Handler(BaseHTTPRequestHandler):
             parts = [p for p in path.split("/") if p][2:]  # bỏ "api","desk"
             if parts == ["poll"] and method == "GET":
                 return self.desk_poll(con, q)
+            if parts == ["active"] and method == "GET":
+                rows = con.execute("select j.id, j.status, j.config_json, u.slug from jobs j join users u on u.id=j.user_id "
+                                   "where j.status in ('dispatched','running') order by j.id").fetchall()
+                return self.send_json({"ok": True, "jobs": [{"id": r["id"], "status": r["status"], "slug": r["slug"],
+                                                             "config": json.loads(r["config_json"])} for r in rows]})
             if parts == ["alphas"] and method == "POST":
                 body = self.read_json()
                 u = con.execute("select id from users where slug=?", (str(body.get("slug", "")),)).fetchone()
@@ -565,11 +658,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(404, "không có job")
         if action == "update":
             st = body.get("status")
+            if st is None and j["status"] == "failed":
+                # web từng đánh dấu mất theo dõi nhưng desk vẫn đang theo dõi run -> trả lại trạng thái đang chạy
+                con.execute("update jobs set status='running', finished=NULL where id=?", (jid,))
             if st in ("running", "failed", "cancelled"):
                 finished = now_iso() if st in ("failed", "cancelled") else None
                 con.execute("update jobs set status=?, finished=coalesce(?, finished) where id=?", (st, finished, jid))
             if "progress" in body:
-                con.execute("update jobs set progress=? where id=?", (float(body["progress"]), jid))
+                p = float(body["progress"])
+                con.execute("update jobs set progress_at=? where id=? and coalesce(progress,-1) != ?", (time.time(), jid, p))
+                con.execute("update jobs set progress=? where id=?", (p, jid))
             if "message" in body:
                 con.execute("update jobs set message=? where id=?", (str(body["message"])[:500], jid))
             con.execute("update jobs set last_update=? where id=?", (time.time(), jid))
@@ -577,6 +675,7 @@ class Handler(BaseHTTPRequestHandler):
             cancel = bool(con.execute("select cancel from jobs where id=?", (jid,)).fetchone()[0])
             return self.send_json({"ok": True, "cancel": cancel})
         if action == "result":
+            con.execute("update jobs set last_update=? where id=?", (time.time(), jid))
             for v in body.get("variants", []):
                 con.execute("insert or replace into variants(job_id,run_id,symbol,params_json,trades,net_profit,dd_pct,pf,winrate,"
                             "sharpe,tit,fitness,recovery,is_pass,recent_sharpe) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -595,6 +694,7 @@ def main():
     if not CFG.get("desk_token"):
         sys.exit("Thiếu desk_token. Chạy: python qc_admin.py init")
     init_db()
+    threading.Thread(target=sweeper, daemon=True).start()
     srv = ThreadingHTTPServer((CFG["host"], int(CFG["port"])), Handler)
     srv.daemon_threads = True
     print(f"QuanTechCap web: http://{CFG['host']}:{CFG['port']}  (db: {DB_PATH})", flush=True)
