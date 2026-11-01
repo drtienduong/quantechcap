@@ -438,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "desk_notice": offline_note(con, "Job và bản nộp alpha"),
                                        "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
-                                       "limits": LIMITS, "fx25": C.FX25, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
+                                       "limits": LIMITS, "fx25": C.FX25, "symbols": C.symbols_info(), "groups": C.GROUPS, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
             if parts == ["alphas"]:
                 rows = con.execute("select name, params_json, meta_json, updated from alphas where user_id=? order by name",
                                    (uid,)).fetchall()

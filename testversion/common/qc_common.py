@@ -11,6 +11,45 @@ from datetime import datetime
 FX25 = ("AUDCAD AUDJPY AUDNZD AUDUSD CADCHF EURAUD EURCAD EURCHF EURGBP EURJPY EURNZD EURUSD "
         "GBPAUD GBPCAD GBPCHF GBPNZD GBPUSD NZDUSD USDCHF USDJPY AUDCHF CADJPY CHFJPY GBPJPY USDCAD").split()
 PERIODS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
+# Toàn bộ symbol trader được chạy (theo data-tickstory, 2026-10-31). USDHKD chỉ dùng quy đổi HKD -> USD, không cho chạy.
+# symbol: (nhóm, point value / 1 lot (lãi khi giá đổi 1.0), ngày bắt đầu dữ liệu, có swap synthetic)
+# Point value lấy theo cấu hình Dương đang dùng trong rust-quant/alpha-source/*.ini.
+_FX_START = {"AUDCAD": "2006.01.03", "AUDCHF": "2006.03.01", "AUDJPY": "2003.12.01", "AUDNZD": "2006.12.12", "AUDUSD": "2003.08.04",
+             "CADCHF": "2006.01.03", "CADJPY": "2004.10.25", "CHFJPY": "2003.08.04", "EURAUD": "2005.10.09", "EURCAD": "2004.10.25",
+             "EURCHF": "2003.08.04", "EURGBP": "2003.08.04", "EURJPY": "2003.08.04", "EURNZD": "2006.01.03", "EURUSD": "2003.05.05",
+             "GBPAUD": "2006.03.22", "GBPCAD": "2006.01.03", "GBPCHF": "2003.08.04", "GBPJPY": "2003.08.04", "GBPNZD": "2006.01.03",
+             "GBPUSD": "2003.05.05", "NZDUSD": "2003.08.04", "USDCAD": "2003.08.04", "USDCHF": "2003.05.05", "USDJPY": "2003.05.05",
+             "NZDCAD": "2006.01.03", "NZDCHF": "2006.01.03", "NZDJPY": "2006.01.03", "USDCNH": "2012.06.27"}
+SYMBOLS = {s: ("FX", 100000.0, d, True) for s, d in _FX_START.items()}
+SYMBOLS.update({
+    "XAUUSD": ("Kim loại", 100.0, "2003.05.05", True),
+    "XAGUSD": ("Kim loại", 5000.0, "2003.05.05", False),
+    "BRENTCMDUSD": ("Năng lượng", 1000.0, "2010.12.03", False),
+    "LIGHTCMDUSD": ("Năng lượng", 1000.0, "2013.01.01", False),
+    "USA500IDXUSD": ("Chỉ số", 1.0, "2011.09.19", False),
+    "DEUIDXEUR": ("Chỉ số", 1.0, "2011.09.19", False),
+    "GBRIDXGBP": ("Chỉ số", 1.0, "2011.09.19", False),
+    "EUSIDXEUR": ("Chỉ số", 1.0, "2011.09.19", False),
+    "ESPIDXEUR": ("Chỉ số", 1.0, "2017.12.01", False),
+    "AUSIDXAUD": ("Chỉ số", 1.0, "2013.01.03", False),
+    "HKGIDXHKD": ("Chỉ số", 100.0, "2011.09.19", False),
+    "BTCUSD": ("Crypto", 1.0, "2017.05.07", False),
+    "ETHUSD": ("Crypto", 1.0, "2017.12.11", False),
+    "BTCUSDT_BN": ("Crypto", 1.0, "2017.08.17", False),
+    "ETHUSDT_BN": ("Crypto", 1.0, "2017.08.17", False),
+    "BNBUSDT_BN": ("Crypto", 1.0, "2017.11.06", False),
+    "LTCUSDT_BN": ("Crypto", 1.0, "2017.12.13", False),
+    "NEOUSDT_BN": ("Crypto", 1.0, "2017.11.20", False),
+})
+GROUPS = ["FX", "Kim loại", "Năng lượng", "Chỉ số", "Crypto"]
+SYMBOL_ORDER = list(FX25) + [s for g in GROUPS for s in SYMBOLS if SYMBOLS[s][0] == g and s not in FX25]
+
+
+def symbols_info():
+    """Cho giao diện: danh sách symbol theo thứ tự hiển thị."""
+    return [{"symbol": s, "group": SYMBOLS[s][0], "point_value": SYMBOLS[s][1], "start": SYMBOLS[s][2], "swap": SYMBOLS[s][3]}
+            for s in SYMBOL_ORDER]
 JOB_TYPES = ["optimize_is", "smoke"]
 
 DEFAULT_LIMITS = {
@@ -91,10 +130,10 @@ def validate_job(cfg, catalog, limits=None):
         errs.append("symbols_mode phải là portfolio hoặc independent")
     out["symbols_mode"] = mode
     syms = cfg.get("symbols")
-    if not isinstance(syms, list) or not syms or len(syms) > len(FX25) or len(set(syms)) != len(syms) \
-            or any(s not in FX25 for s in syms):
-        errs.append("symbols: danh sách không rỗng, không trùng, thuộc 25 cặp FX cho phép")
-    out["symbols"] = [s for s in FX25 if isinstance(syms, list) and s in syms]  # thứ tự chuẩn
+    if not isinstance(syms, list) or not syms or len(syms) > len(SYMBOLS) or len(set(syms)) != len(syms) \
+            or any(s not in SYMBOLS for s in syms):
+        errs.append("symbols: danh sách không rỗng, không trùng, thuộc danh sách symbol cho phép")
+    out["symbols"] = [s for s in SYMBOL_ORDER if isinstance(syms, list) and s in syms]  # thứ tự chuẩn
     if typ == "smoke" and isinstance(syms, list) and len(syms) > lim["smoke_max_symbols"]:
         errs.append(f"smoke: tối đa {lim['smoke_max_symbols']} symbol")
 
@@ -111,6 +150,9 @@ def validate_job(cfg, catalog, limits=None):
             errs.append(f"todate phải <= {lim['is_end']} (job IS không được chạm OS1/OS2)")
         if fd >= td:
             errs.append("fromdate phải trước todate")
+        late = [s for s in out["symbols"] if _date(SYMBOLS[s][2]) >= td]
+        if late:
+            errs.append("không có dữ liệu trước todate cho: " + ", ".join(f"{s} (từ {SYMBOLS[s][2]})" for s in late))
         if typ == "smoke" and (td - fd).days > lim["smoke_max_days"]:
             errs.append(f"smoke: khoảng thời gian tối đa {lim['smoke_max_days']} ngày")
     except ValueError as e:
@@ -134,6 +176,10 @@ def validate_job(cfg, catalog, limits=None):
     out["leverage"] = cfg.get("leverage")
     if cfg.get("swap_mode") not in ("zero", "synthetic"):
         errs.append("swap_mode phải là zero hoặc synthetic")
+    elif cfg.get("swap_mode") == "synthetic":
+        noswap = [s for s in out["symbols"] if not SYMBOLS[s][3]]
+        if noswap:
+            errs.append("swap synthetic chỉ có cho FX và XAUUSD; bỏ chọn hoặc dùng swap zero cho: " + ", ".join(noswap))
     out["swap_mode"] = cfg.get("swap_mode")
 
     # tham số: chỉ tên có trong catalog; thiếu thì dùng mặc định (đơn trị)
@@ -187,6 +233,8 @@ def build_ini(cfg, alpha_file, data_folder, swap_folder):
         f"swap_folder = {swap_folder}",
         f"lot = {fnum(cfg['lot'])}",
         f"point_value_per_lot = {fnum(cfg['point_value_per_lot'])}",
+        *([f"point_value_map = " + ",".join(f"{s}:{fnum(SYMBOLS[s][1])}" for s in cfg["symbols"] if SYMBOLS[s][0] != "FX")]
+          if any(SYMBOLS[s][0] != "FX" for s in cfg["symbols"]) else []),
         f"commission_per_trade = {fnum(cfg['commission_per_trade'])}",
         f"max_ticks = {int(cfg.get('max_ticks', 0))}",
         f"alpha_name = {alpha_name}",

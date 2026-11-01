@@ -204,9 +204,15 @@ async function pageRun(main, name) {
     lot: h("input", { type: "number", value: 0.01, step: "any" }), pv: h("input", { type: "number", value: 100000 }),
     comm: h("input", { type: "number", value: 0, step: "any" }), ticks: h("input", { type: "number", value: 200000 }),
   };
-  const boxes = ST.fx25.map((s) => h("input", { type: "checkbox", value: s, checked: s === "EURUSD" }));
-  const symLabels = boxes.map((b) => h("label", { class: "sym" }, b, b.value));
+  const SYM = Object.fromEntries(ST.symbols.map((x) => [x.symbol, x]));
+  const boxes = ST.symbols.map((x) => h("input", { type: "checkbox", value: x.symbol, checked: x.symbol === "EURUSD" }));
+  const boxOf = Object.fromEntries(boxes.map((b) => [b.value, b]));
+  const symGroups = ST.groups.map((g) => h("div", { class: "symgroup" }, h("b", {}, g + ": "),
+    ST.symbols.filter((x) => x.group === g).map((x) => h("label", { class: "sym", title: `từ ${x.start} · point value ${x.point_value}/lot${x.swap ? " · có swap" : ""}` },
+      boxOf[x.symbol], x.symbol))));
   const setSyms = (list) => boxes.forEach((b) => { b.checked = list.includes(b.value); });
+  const addSyms = (list) => boxes.forEach((b) => { if (list.includes(b.value)) b.checked = true; });
+  const groupSyms = (g) => ST.symbols.filter((x) => x.group === g).map((x) => x.symbol);
   const pRows = Object.entries(a.params).map(([k, v]) => ({
     k, a: h("input", { type: "number", value: v[0], step: "any" }), s: h("input", { type: "number", value: v[1], step: "any" }), b: h("input", { type: "number", value: v[2], step: "any" }),
   }));
@@ -275,13 +281,16 @@ async function pageRun(main, name) {
     h("div", { class: "card" }, h("h3", {}, "Symbol"), h("div", { class: "row" }, h("label", {}, "Chế độ", h("br"), f.mode),
       h("button", { class: "btn", on: { click: () => setSyms(["EURUSD"]) } }, "Chỉ EURUSD"),
       h("button", { class: "btn", on: { click: () => setSyms(ST.fx25.slice(0, 20)) } }, "20 cặp"),
-      h("button", { class: "btn", on: { click: () => setSyms(ST.fx25) } }, "25 cặp"),
+      h("button", { class: "btn", on: { click: () => setSyms(ST.fx25) } }, "25 cặp FX"),
+      ST.groups.filter((g) => g !== "FX").map((g) => h("button", { class: "btn", on: { click: () => addSyms(groupSyms(g)) } }, "+ " + g)),
       h("button", { class: "btn", on: { click: () => setSyms([]) } }, "Bỏ hết")),
-      h("div", { class: "symbox" }, symLabels),
+      h("div", { class: "symbox" }, symGroups),
+      h("p", { class: "muted" }, "Point value/lot tự đặt theo symbol: FX 100000 (ô bên dưới), XAUUSD 100, XAGUSD 5000, dầu 1000, chỉ số 1 (HKGIDXHKD 100), crypto 1. ",
+        "Swap synthetic chỉ có cho FX và XAUUSD. Dữ liệu *_BN (Binance) là tick tổng hợp từ nến 1 phút. Rê chuột lên symbol để xem ngày bắt đầu dữ liệu."),
       h("p", { class: "warn" }, "Lưu ý: alpha dùng thông tin tài khoản (…_with_account) chỉ giao dịch ở chế độ Portfolio; chế độ \"Từng symbol riêng\" có thể ra 0 lệnh.")),
     h("div", { class: "card" }, h("h3", {}, "Tài khoản"), h("div", { class: "row" },
       h("label", {}, "Deposit", h("br"), f.deposit), h("label", {}, "Leverage", h("br"), f.leverage), h("label", {}, "Swap", h("br"), f.swap),
-      h("label", {}, "Lot", h("br"), f.lot), h("label", {}, "Point value/lot", h("br"), f.pv), h("label", {}, "Commission/lot/deal", h("br"), f.comm))),
+      h("label", {}, "Lot", h("br"), f.lot), h("label", {}, "Point value/lot (FX)", h("br"), f.pv), h("label", {}, "Commission/lot/deal", h("br"), f.comm))),
     h("div", { class: "card" }, h("h3", {}, "Tham số (start, step, stop; step = 0 là một giá trị)"),
       h("table", {}, h("tr", {}, h("th", {}, "Tham số"), h("th", {}, "Start"), h("th", {}, "Step"), h("th", {}, "Stop")),
         pRows.map((p) => h("tr", {}, h("td", { class: "mono" }, p.k), h("td", {}, p.a), h("td", {}, p.s), h("td", {}, p.b)))),
