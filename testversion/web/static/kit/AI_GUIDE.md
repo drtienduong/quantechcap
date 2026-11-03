@@ -72,7 +72,7 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
 - The alpha is not told the symbol or its point size in Independent mode. The pattern
   `fn point_size(price: f64) -> f64 { if price >= 20.0 { 0.001 } else { 0.00001 } }` is only valid for FX
   (JPY pairs vs others). Symbols available besides FX: metals (XAUUSD, XAGUSD), energy (BRENTCMDUSD, LIGHTCMDUSD),
-  indices (USA500IDXUSD, DEUIDXEUR, GBRIDXGBP, EUSIDXEUR, ESPIDXEUR, AUSIDXAUD, HKGIDXHKD), crypto (BTCUSD, ETHUSD and
+  indices (USA500IDXUSD, USATECHIDXUSD, DEUIDXEUR, GBRIDXGBP, EUSIDXEUR, ESPIDXEUR, AUSIDXAUD, HKGIDXHKD), crypto (BTCUSD, ETHUSD and
   Binance *_BN pairs). If the alpha may run on non-FX symbols, express SL/TP and thresholds RELATIVE to price
   (ATR multiples or a percent of price), never as FX points.
 

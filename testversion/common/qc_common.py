@@ -28,6 +28,7 @@ SYMBOLS.update({
     "BRENTCMDUSD": ("Năng lượng", 1000.0, "2010.12.03", False),
     "LIGHTCMDUSD": ("Năng lượng", 1000.0, "2013.01.01", False),
     "USA500IDXUSD": ("Chỉ số", 1.0, "2011.09.19", False),
+    "USATECHIDXUSD": ("Chỉ số", 1.0, "2011.09.19", False),     # thêm 2026-11-03 từ TickStory CSV
     "DEUIDXEUR": ("Chỉ số", 1.0, "2011.09.19", False),
     "GBRIDXGBP": ("Chỉ số", 1.0, "2011.09.19", False),
     "EUSIDXEUR": ("Chỉ số", 1.0, "2011.09.19", False),
