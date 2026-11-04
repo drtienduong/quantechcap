@@ -5,7 +5,7 @@
   "data_folder": "C:\\Users\\zicza\\Documents\\rust-quant\\data-tickstory",
   "swap_folder": "C:\\Users\\zicza\\Documents\\rust-quant\\data-swap",
   "python": "C:\\Claude\\.venv\\Scripts\\python.exe",
-  "tools": "C:\\Claude\\workspace\\claude_traders\\_shared\\tools",
+  "tools": "C:\\Claude\\agents\\claude_traders\\_shared\\tools",
   "cli": "C:\\Users\\zicza\\Documents\\rust-quant\\backtest-optimzie-rust-tool\\backtest-optimzie-rust-cli.exe",
   "traders": {
     "duong-nguyen": {
