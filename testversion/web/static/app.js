@@ -71,7 +71,8 @@ function QC_APP() {
   function setNav() {
     const cur = location.hash || "#/";
     nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"]].map(([href, label]) =>
-      h("a", { href, class: (cur === href || (href === "#/jobs" && cur.startsWith("#/job"))) ? "active" : "" }, label)));
+      h("a", { href, class: (cur === href || (href === "#/jobs" && cur.startsWith("#/job"))) ? "active" : "" }, label)),
+      h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Hướng dẫn AI"));
   }
   async function route() {
     clearTimers();
@@ -99,7 +100,7 @@ async function pageAlphas(main) {
     h("td", { class: "muted" }, a.updated), h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))));
   main.replaceChildren(h("h2", {}, "Alpha của bạn"),
     h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Khung"), h("th", {}, "Đồng bộ"), h("th")), rows)
-      : h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo bộ khung rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), ".")),
+      : h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "bộ khung"), " rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), ".")),
     h("p", { class: "muted" }, "Alpha đã duyệt được lưu và chạy trên data-server. Danh sách đồng bộ mỗi phút."));
 }
 
@@ -171,12 +172,8 @@ async function pageSubmit(main) {
     h("div", { class: "card" }, h("h3", {}, "Nộp mã nguồn (.rs)"),
       h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, `Tên alpha (kết thúc bằng ${suffix})`, h("br"), nameIn), btn),
       info,
-      h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về.")),
-    h("div", { class: "card" }, h("h3", {}, "Bộ khung alpha cho AI của bạn"),
-      h("p", {}, "Tải bộ khung, giải nén, đưa toàn bộ cho AI của bạn (Claude, ChatGPT…) kèm ý tưởng giao dịch. Yêu cầu AI đọc AI_GUIDE.md trước."),
-      h("a", { href: "/kit/quantechcap_alpha_kit.zip", download: "quantechcap_alpha_kit.zip", class: "btn primary" }, "Tải bộ khung (.zip)"),
-      h("p", { class: "muted" }, "Gồm: ", ST.kit.join(", "), "."),
-      h("p", { class: "muted" }, "Alpha chỉ được tính toán trên dữ liệu engine đưa vào; không đọc file, mạng, dữ liệu ngoài. Vi phạm sẽ bị từ chối tự động.")),
+      h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về."),
+      h("p", { class: "muted" }, "Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Bộ khung alpha cho AI"), ".")),
     detail,
     h("div", { class: "card" }, h("h3", {}, "Các lần nộp"), listBox));
   let pending = await load();
@@ -535,5 +532,6 @@ function buildViewer(id, job) {
 }
 
 /* khoi dong tu dong (CSP chan script nhung trong HTML) */
-if (document.getElementById("f")) QC_LOGIN();
+if (location.hash === "#/guide_ai") location.replace("/guide_ai");   // trang hướng dẫn công khai, không cần đăng nhập
+else if (document.getElementById("f")) QC_LOGIN();
 else if (document.getElementById("app")) QC_APP();

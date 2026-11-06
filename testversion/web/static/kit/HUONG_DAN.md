@@ -1,9 +1,11 @@
 # Hướng dẫn viết và nộp alpha QuanTechCap
 
 ## Quy trình
-1. Tải bộ khung trên web (trang "Nộp alpha"): `AI_GUIDE.md`, `qc_alpha_api.rs`, `alpha_template.rs`, 2 alpha mẫu.
-2. Đưa toàn bộ các file này cho AI của bạn (Claude, ChatGPT...) kèm ý tưởng giao dịch. Yêu cầu AI đọc `AI_GUIDE.md`
-   trước và viết đúng theo đó. Chỉ cần MỘT file `.rs`.
+1. Bộ khung luôn ở trang https://research.quantechcap.com/guide_ai (công khai, bản mới nhất): `AI_GUIDE.md`,
+   `qc_alpha_api.rs`, `alpha_template.rs`, 2 alpha mẫu.
+2. Đưa link trang cho AI của bạn (Claude, ChatGPT...) kèm ý tưởng giao dịch. Yêu cầu AI đọc toàn bộ trang, nhất là
+   `AI_GUIDE.md`, và viết đúng theo đó. Chỉ cần MỘT file `.rs`. AI không đọc được web thì tải bản offline (.zip)
+   trên cùng trang và đính kèm vào chat.
 3. Đặt tên file: `<tên_alpha>_<hậu tố của bạn>.rs` (hậu tố hiện trên trang nộp alpha). Chỉ chữ, số, dấu `_`.
 4. Nộp file trên web. Data-server kiểm tra tự động trong vài giây:
    - Lỗi quy tắc an toàn hoặc lỗi biên dịch: web hiện lỗi kèm số dòng. Đưa lỗi cho AI sửa rồi nộp lại.

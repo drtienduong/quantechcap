@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "common"))
 import qc_common as C  # noqa: E402
+import qc_guide as G  # noqa: E402
 
 # Docker: đặt QC_DATA_DIR / QC_WEB_CONFIG trỏ vào volume; không đặt thì giữ như cũ (cạnh file này).
 DATA_DIR = Path(os.environ.get("QC_DATA_DIR") or HERE / "data")
@@ -36,7 +37,8 @@ DB_PATH = DATA_DIR / "qc.sqlite"
 CONFIG_PATH = Path(os.environ.get("QC_WEB_CONFIG") or HERE / "web_config.json")
 STATIC = HERE / "static"
 STATIC_FILES = {"/static/app.js": "application/javascript; charset=utf-8",
-                "/static/style.css": "text/css; charset=utf-8"}
+                "/static/style.css": "text/css; charset=utf-8",
+                "/static/guide.css": "text/css; charset=utf-8"}
 KIT_DIR = STATIC / "kit"
 KIT_FILES = {"HUONG_DAN.md", "AI_GUIDE.md", "qc_alpha_api.rs", "alpha_template.rs", "example_ma_cross_bar.rs",
              "example_tick_range_breakout.rs", "reserved_names.txt", "local_check.rs"}
@@ -280,7 +282,8 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in (extra or []):
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        if not getattr(self, "_head", False):
+            self.wfile.write(body)
 
     def send_json(self, obj, status=200, extra=None):
         self.send_bytes(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", extra)
@@ -318,10 +321,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- định tuyến ----------
     def do_GET(self):
+        self._head = False
         self.route("GET")
 
     def do_POST(self):
+        self._head = False
         self.route("POST")
+
+    def do_HEAD(self):
+        self._head = True
+        self.route("GET")
 
     def route(self, method):
         u = urlparse(self.path)
@@ -337,6 +346,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.user_api(method, path, q)
             if path.startswith("/kit/") and method == "GET":
                 return self.kit_file(path[5:])
+            if path in ("/guide_ai", "/guide_ai/", "/guide_ai.md", "/guide_ai.txt") and method == "GET":
+                return self.guide(path)
             if path in STATIC_FILES and method == "GET":
                 return self.send_bytes(200, (STATIC / path.split("/")[-1]).read_bytes(), STATIC_FILES[path])
             if path == "/login" and method == "GET":
@@ -360,17 +371,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def guide(self, path):
+        """Trang hướng dẫn bộ khung alpha cho AI: CÔNG KHAI (Dương quyết 2026-11-06), không cần đăng nhập.
+        Chỉ chứa nội dung static/kit/, không chứa dữ liệu trader, alpha hay đường dẫn data-server."""
+        base = (CFG.get("public_url") or "https://research.quantechcap.com").rstrip("/")
+        extra = [("X-Robots-Tag", "noindex")]
+        if path in ("/guide_ai.md", "/guide_ai.txt"):
+            ctype = "text/markdown; charset=utf-8" if path.endswith(".md") else "text/plain; charset=utf-8"
+            return self.send_bytes(200, G.bundle_md(KIT_DIR, base, KIT_ZIP).encode("utf-8"), ctype, extra)
+        return self.send_bytes(200, G.page_html(KIT_DIR, base, KIT_ZIP).encode("utf-8"), "text/html; charset=utf-8", extra)
+
     def kit_file(self, name):
-        con = db()
-        try:
-            if not self.session(con):
-                return self.fail(401, "chưa đăng nhập")
-        finally:
-            con.close()
+        # công khai cùng trang /guide_ai (bản offline cho AI không đọc được web)
         if name == KIT_ZIP:
             # toàn bộ bộ khung trong một file zip (thư mục quantechcap_alpha_kit/)
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                base = (CFG.get("public_url") or "https://research.quantechcap.com").rstrip("/")
+                # bản gộp một file (giống /guide_ai.md): AI chỉ nhận ít file đính kèm thì dùng file này
+                z.writestr("quantechcap_alpha_kit/QUANTECHCAP_GUIDE_AI.md", G.bundle_md(KIT_DIR, base, KIT_ZIP))
                 for f in sorted(KIT_FILES):
                     if (KIT_DIR / f).is_file():
                         z.write(KIT_DIR / f, "quantechcap_alpha_kit/" + f)

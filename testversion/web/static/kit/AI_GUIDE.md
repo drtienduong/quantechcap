@@ -4,7 +4,8 @@ You are helping a trader write ONE Rust source file (an "alpha") for the QuanTec
 The file is uploaded on the QuanTechCap website, checked automatically, reviewed, then compiled and run on
 QuanTechCap's data-server. The trader cannot run the engine locally, so the file must be correct on the first try.
 
-Files in this kit:
+Files in this kit (all shown on https://research.quantechcap.com/guide_ai, plain text at
+https://research.quantechcap.com/guide_ai.md, offline copy in the zip linked there; that page is always the latest version):
 - `qc_alpha_api.rs`: the exact API (types, trait) the engine provides. Read it first. Do NOT submit it.
 - `alpha_template.rs`: skeleton to start from.
 - `example_ma_cross_bar.rs`: bar-based signal, tick-based execution, SL/TP.
@@ -53,7 +54,7 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
 
 - `create_alpha` is called once per parameter combination (variant). Variants run in parallel threads, each with its
   own instance. Keep ALL state in your struct fields.
-- Data: real ticks (bid/ask) of the chosen FX symbols, in-sample period only (up to 2024-01-01).
+- Data: real ticks (bid/ask) of the chosen symbols, in-sample period only (up to 2024-01-01).
   Time is the tick data's own clock (`tick.time_ms` epoch ms, `tick.date` = yyyymmdd, `tick.time_of_day_ms`).
 - Bars are built by the engine from BID prices for the timeframe chosen on the website (M1, M5, M15, M30, H1, H4, D1),
   aligned to the epoch. `on_bar(&Bar)` is called with the just-completed bar when the FIRST tick of the next bar

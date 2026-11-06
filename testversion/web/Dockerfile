@@ -15,7 +15,7 @@ RUN useradd --create-home --uid 10001 qc \
 
 WORKDIR /app
 COPY common/ /app/common/
-COPY web/qc_web.py web/qc_admin.py /app/web/
+COPY web/qc_web.py web/qc_admin.py web/qc_guide.py /app/web/
 COPY web/static/ /app/web/static/
 
 USER qc
