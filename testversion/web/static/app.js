@@ -83,7 +83,7 @@ function QC_APP() {
     try {
       if (hash.startsWith("#/run/")) await pageRun(main, decodeURIComponent(hash.slice(6)));
       else if (hash.startsWith("#/job/")) await pageJob(main, parseInt(hash.slice(6), 10));
-      else if (hash === "#/jobs") await pageJobs(main);
+      else if (hash === "#/jobs" || hash.startsWith("#/jobs/")) await pageJobs(main, parseInt(hash.slice(7), 10) || 1);
       else if (hash === "#/submit") await pageSubmit(main);
       else await pageAlphas(main);
     } catch (e) { if (String(e) !== "Error: 401") main.replaceChildren(h("p", { class: "err" }, "Lỗi: " + e)); }
@@ -300,20 +300,49 @@ async function pageRun(main, name) {
 const statusLabel = { queued: "đang chờ", dispatched: "đã giao data-server", running: "đang chạy", done: "xong", failed: "lỗi", cancelled: "đã hủy" };
 const tag = (s) => h("span", { class: "tag " + s }, statusLabel[s] || s);
 
-async function pageJobs(main) {
+const JOBS_PER_PAGE = 20;
+async function pageJobs(main, page) {
+  page = Math.max(1, page || 1);
+  const head = h("h2", {}, "Lịch sử chạy");
+  const box = h("div", { class: "card" }, h("p", { class: "muted" }, "Đang tải…"));
+  main.replaceChildren(head, box);
+  let last = "", active = false;
+  const go = (p) => { location.hash = p > 1 ? "#/jobs/" + p : "#/jobs"; };
+  function pagerEl(pages, total) {
+    if (pages <= 1) return h("p", { class: "muted small" }, total + " job");
+    const nums = [];
+    for (let p = 1; p <= pages; p++) {
+      if (p === 1 || p === pages || Math.abs(p - page) <= 2) nums.push(p);
+      else if (nums[nums.length - 1] !== "…") nums.push("…");
+    }
+    return h("div", { class: "pager" },
+      h("button", { class: "btn", disabled: page <= 1, on: { click: () => go(page - 1) } }, "‹ Mới hơn"),
+      nums.map((p) => p === "…" ? h("span", { class: "muted" }, "…")
+        : h("button", { class: "btn" + (p === page ? " primary" : ""), on: { click: () => go(p) } }, String(p))),
+      h("button", { class: "btn", disabled: page >= pages, on: { click: () => go(page + 1) } }, "Cũ hơn ›"),
+      h("span", { class: "muted" }, `Trang ${page}/${pages} · ${total} job`));
+  }
   async function load() {
-    const r = await api("/api/jobs?limit=50");
-    main.replaceChildren(h("h2", {}, "Lịch sử chạy"), h("div", { class: "card" }, r.jobs.length ? h("table", {},
+    const r = await api(`/api/jobs?limit=${JOBS_PER_PAGE}&offset=${(page - 1) * JOBS_PER_PAGE}`);
+    const pages = Math.max(1, Math.ceil((r.total || 0) / JOBS_PER_PAGE));
+    if (page > pages) { go(pages); return; }
+    active = r.jobs.some((j) => ["queued", "dispatched", "running"].includes(j.status));
+    const key = JSON.stringify(r);
+    if (key === last) return;           // không đổi thì không vẽ lại (tránh nháy, giữ thao tác của người dùng)
+    last = key;
+    box.replaceChildren(...(r.jobs.length ? [pagerEl(pages, r.total), h("table", {},
       h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
       r.jobs.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
         h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", {}, tag(j.status)),
         h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")),
         h("td", { class: j.status === "failed" ? "err small" : (j.notice ? "warn small" : "muted small") }, j.notice || (j.status === "done" ? "" : j.message || "")),
-        h("td", { class: "muted" }, j.created)))
-    ) : h("p", { class: "muted" }, "Chưa có job.")));
+        h("td", { class: "muted" }, j.created)))),
+      pages > 1 ? pagerEl(pages, r.total) : null].filter(Boolean)
+      : [h("p", { class: "muted" }, "Chưa có job.")]));
   }
   await load();
-  timers.push(setInterval(() => load().catch(() => {}), 3000));
+  let tick = 0;   // có job đang chạy trên trang: cập nhật 3 giây/lần; không thì 15 giây/lần
+  timers.push(setInterval(() => { tick++; if (active || tick % 5 === 0) load().catch(() => {}); }, 3000));
 }
 
 /* ---------- chi tiết job ---------- */
