@@ -196,7 +196,7 @@ async function pageRun(main, name) {
     mode: h("select", {}, h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)"), h("option", { value: "independent" }, "Từng symbol riêng")),
     period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === ((a.meta && a.meta.required_period) || "H1") }, p))),
     from: h("input", { type: "text", value: "2010.01.01", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
-    deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:100", size: 7 }),
+    deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:1000", size: 7, title: "Tối đa 1:1000. Margin call 100%, stop-out 50%." }),
     swap: h("select", {}, h("option", { value: "zero" }, "zero (không swap)"), h("option", { value: "synthetic" }, "synthetic")),
     lot: h("input", { type: "number", value: 0.01, step: "any" }), pv: h("input", { type: "number", value: 100000 }),
     comm: h("input", { type: "number", value: 0, step: "any" }), ticks: h("input", { type: "number", value: 200000 }),
@@ -424,7 +424,8 @@ const vpanel = (title, ...kids) => h("section", { class: "vwp" }, h("div", { cla
 const METRIC_NAMES = ["net_profit", "custom_sharpe", "fitness", "profit_factor", "expected_payoff", "reward_risk", "recovery_factor",
   "sharpe_ratio", "gross_profit", "gross_loss", "balance_dd", "equity_dd", "max_drawdown", "max_drawdown_pct", "winrate", "trades", "deals",
   "profit_trades", "loss_trades", "long_trades", "short_trades", "long_win_pct", "short_win_pct", "max_profit_trade", "max_loss_trade", "con_profit_max_money", "con_loss_max_money", "time_in_trade_percent",
-  "time_in_loss_percent", "average_trade_hours", "min_marginlevel", "history_quality", "bars", "ticks"];
+  "time_in_loss_percent", "average_trade_hours", "min_marginlevel", "account_leverage", "margin_call_level", "stopout_level",
+  "stopped_out", "stopout_time", "stopout_closes", "rejected_orders", "history_quality", "bars", "ticks"];
 
 function drawEquity(canvas, pts) {
   const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height, pad = 38;
@@ -470,6 +471,7 @@ function buildViewer(id, job) {
     runList.replaceChildren(...(S.rows.length ? S.rows.map((v) => h("div", { class: "vwrun" + (v.run_id === S.sel ? " active" : ""), on: { click: () => selectRun(v) } },
       h("strong", {}, `${v.symbol} ${c.period}`),
       h("div", { class: "vwmeta" }, h("span", {}, Object.entries(v.params).filter(([k]) => optKeys.has(vkey(k))).map(([k, x]) => `${k}=${x}`).join(" ") || "-"), h("span", {}, `run ${v.run_id}${v.is_pass ? " ✓" : ""}`)),
+      v.stopped_out ? h("div", { class: "vwmeta" }, h("span", { class: "tag failed", title: "Margin level xuống dưới mức stop-out: engine đóng lệnh và dừng biến thể này" }, "STOP-OUT")) : null,
       h("div", { class: "vwmeta" }, h("span", {}, `Sharpe ${vfmt(v.sharpe)}`), h("span", {}, `PF ${vfmt(v.pf)}`), h("span", {}, `P ${vfmt(v.net_profit, 2)}`))))
       : [h("p", { class: "muted" }, "Không có kết quả.")]));
     const end = Math.min(S.offset + S.page, S.total);

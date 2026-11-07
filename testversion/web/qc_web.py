@@ -102,7 +102,8 @@ create table if not exists jobs(id integer primary key autoincrement, user_id in
   finished text, cancel integer default 0, summary_json text, last_update real);
 create table if not exists variants(job_id integer not null, run_id integer not null, symbol text, params_json text,
   trades integer, net_profit real, dd_pct real, pf real, winrate real, sharpe real, tit real, fitness real,
-  recovery real, is_pass integer, recent_sharpe real, primary key(job_id, run_id));
+  recovery real, is_pass integer, recent_sharpe real, stopped_out integer default 0, rejected_orders integer default 0,
+  primary key(job_id, run_id));
 create table if not exists requests(id integer primary key autoincrement, user_id integer not null, job_id integer not null,
   kind text, payload_json text, status text, result_json text, created real);
 create table if not exists meta(k text primary key, v text);
@@ -119,6 +120,11 @@ def init_db():
         con.execute("alter table jobs add column progress_at real")
     if "meta_json" not in {r[1] for r in con.execute("pragma table_info(alphas)")}:
         con.execute("alter table alphas add column meta_json text")
+    vcols = {r[1] for r in con.execute("pragma table_info(variants)")}
+    if "stopped_out" not in vcols:
+        con.execute("alter table variants add column stopped_out integer default 0")
+    if "rejected_orders" not in vcols:
+        con.execute("alter table variants add column rejected_orders integer default 0")
     con.commit()
     con.close()
 
@@ -730,11 +736,14 @@ class Handler(BaseHTTPRequestHandler):
         if action == "result":
             con.execute("update jobs set last_update=? where id=?", (time.time(), jid))
             for v in body.get("variants", []):
+                stopped = 1 if v.get("stopped_out") else 0
                 con.execute("insert or replace into variants(job_id,run_id,symbol,params_json,trades,net_profit,dd_pct,pf,winrate,"
-                            "sharpe,tit,fitness,recovery,is_pass,recent_sharpe) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "sharpe,tit,fitness,recovery,is_pass,recent_sharpe,stopped_out,rejected_orders) "
+                            "values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (jid, int(v["run_id"]), v.get("symbol"), json.dumps(v.get("params", {})), v.get("trades"),
                              v.get("net_profit"), v.get("dd_pct"), v.get("pf"), v.get("winrate"), v.get("sharpe"), v.get("tit"),
-                             v.get("fitness"), v.get("recovery"), 1 if v.get("is_pass") else 0, v.get("recent_sharpe")))
+                             v.get("fitness"), v.get("recovery"), 0 if stopped else (1 if v.get("is_pass") else 0),
+                             v.get("recent_sharpe"), stopped, int(v.get("rejected_orders") or 0)))
             if body.get("final"):
                 con.execute("update jobs set status='done', progress=100, finished=?, summary_json=?, message='Hoàn tất', "
                             "last_update=? where id=?", (now_iso(), json.dumps(body.get("summary", {})), time.time(), jid))

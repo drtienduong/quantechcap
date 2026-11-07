@@ -39,6 +39,12 @@ pub struct AccountView<'a> {
     pub free_margin: f64,
     pub positions_on_symbol: usize,
     pub total_positions: usize,
+    // Account rules in force for this run (see AI_GUIDE "Account rules").
+    pub leverage: f64,                    // 1000.0 means 1:1000
+    pub contract_size: f64,               // units per 1 lot of this symbol (FX 100000, XAUUSD 100, ...)
+    pub commission_per_lot_per_deal: f64,
+    pub margin_call_level: f64,           // % (new orders rejected below this margin level)
+    pub stopout_level: f64,               // % (stop-out below this margin level)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,5 +147,22 @@ pub trait Alpha: Send {
     }
     fn on_tick_with_account(&mut self, tick: &Tick, _account: &AccountView<'_>) -> Signal {
         self.on_tick(tick)
+    }
+    // true: in Independent mode the engine also calls the *_with_account methods,
+    // with the account of that symbol alone. Default false.
+    fn wants_account(&self) -> bool {
+        false
+    }
+    // Optional account rules declared by the alpha. None = use the platform defaults
+    // (1:1000, margin call 100%, stop-out 50%). The platform only accepts STRICTER values:
+    // lower leverage, higher margin call / stop-out levels. Looser values are ignored.
+    fn account_leverage(&self) -> Option<f64> {
+        None
+    }
+    fn margin_call_level(&self) -> Option<f64> {
+        None
+    }
+    fn stopout_level(&self) -> Option<f64> {
+        None
     }
 }

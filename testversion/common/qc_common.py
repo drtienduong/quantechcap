@@ -65,6 +65,10 @@ DEFAULT_LIMITS = {
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
 DATE_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
 LEV_RE = re.compile(r"^1:\d{1,4}$")
+DEFAULT_LEVERAGE = "1:1000"
+MAX_LEVERAGE = 1000
+MARGIN_CALL_LEVEL = 100   # %: mở lệnh mới bị từ chối nếu free margin < 0 hoặc margin level < mức này
+STOPOUT_LEVEL = 50        # %: margin level dưới mức này thì đóng lệnh lỗ lớn nhất trước, rồi dừng backtest
 
 
 def _date(s):
@@ -172,9 +176,12 @@ def validate_job(cfg, catalog, limits=None):
         errs.append("optimize_is: max_ticks phải = 0")
     if typ == "smoke" and not out.get("max_ticks"):
         out["max_ticks"] = 0
-    if not isinstance(cfg.get("leverage"), str) or not LEV_RE.match(cfg["leverage"]):
-        errs.append("leverage dạng 1:100")
-    out["leverage"] = cfg.get("leverage")
+    # quy tắc tài khoản (2026-11-07): leverage tối đa 1:1000 (mặc định), margin call 100%, stop-out 50%.
+    # Trader chỉ được chọn leverage THẤP hơn (chặt hơn); alpha tự khai báo cũng chỉ được chặt hơn.
+    lev = cfg.get("leverage", DEFAULT_LEVERAGE)
+    if not isinstance(lev, str) or not LEV_RE.match(lev) or not (1 <= int(lev.split(":")[1]) <= MAX_LEVERAGE):
+        errs.append(f"leverage dạng 1:N với N từ 1 đến {MAX_LEVERAGE}")
+    out["leverage"] = lev
     if cfg.get("swap_mode") not in ("zero", "synthetic"):
         errs.append("swap_mode phải là zero hoặc synthetic")
     elif cfg.get("swap_mode") == "synthetic":
@@ -227,6 +234,9 @@ def build_ini(cfg, alpha_file, data_folder, swap_folder):
         f"deposit = {fnum(cfg['deposit'])}",
         "account_currency = USD",
         f"leverage = {cfg['leverage']}",
+        f"margin_call_level = {MARGIN_CALL_LEVEL}",
+        f"stopout_level = {STOPOUT_LEVEL}",
+        "alpha_account_rules = stricter",
         f"fromdate = {cfg['fromdate']}",
         f"todate = {cfg['todate']}",
         f"data_folder = {data_folder}",

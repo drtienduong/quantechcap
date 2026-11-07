@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -202,12 +202,20 @@ def collect_variants(run_dir: Path):
                     evalmap[int(r["run_id"])] = (str(r.get("is_pass")).lower() == "true", float(r["recent_sharpe"]) if r.get("recent_sharpe") else None)
                 except (ValueError, KeyError):
                     pass
+    # quy tắc tài khoản (engine 2026-11-07): stop-out = biến thể hỏng, không được tính pass
+    acct = {}
+    if con.execute("select count(*) from sqlite_master where type='table' and name='account_rules'").fetchone()[0]:
+        for rid, so, rej in con.execute("select run_id, stopped_out, rejected_orders from account_rules"):
+            acct[rid] = (bool(so), int(rej or 0))
     out = []
     q = ("select i.run_id,i.symbol,i.parameters_json,m.trades,m.net_profit,m.max_drawdown_pct,m.profit_factor,m.winrate,"
          "m.custom_sharpe,m.time_in_trade_percent,m.fitness,m.recovery_factor from input i join metrics m on m.run_id=i.run_id order by i.run_id")
     for r in con.execute(q):
         ip, rs = evalmap.get(r[0], (False, None))
-        out.append({"run_id": r[0], "symbol": r[1], "params": json.loads(r[2] or "{}"), "trades": r[3], "net_profit": clean(r[4]),
+        so, rej = acct.get(r[0], (False, 0))
+        if so:
+            ip = False
+        out.append({"stopped_out": so, "rejected_orders": rej, "run_id": r[0], "symbol": r[1], "params": json.loads(r[2] or "{}"), "trades": r[3], "net_profit": clean(r[4]),
                     "dd_pct": clean(r[5]), "pf": clean(r[6]), "winrate": clean(r[7]), "sharpe": clean(r[8]), "tit": clean(r[9]),
                     "fitness": clean(r[10]), "recovery": clean(r[11]), "is_pass": ip, "recent_sharpe": clean(rs)})
     con.close()
@@ -594,6 +602,15 @@ def handle_request(req):
                 n, won = side[sd]
                 metrics[f"{sd}_trades"] = n
                 metrics[f"{sd}_win_pct"] = round(100.0 * won / n, 2) if n else None
+            has_acct = con.execute("select count(*) from sqlite_master where type='table' and name='account_rules'").fetchone()[0]
+            arow = con.execute("select leverage, margin_call_level, stopout_level, stopped_out, stopout_time_ms, stopout_closes, "
+                               "rejected_orders from account_rules where run_id=?", (run_id,)).fetchone() if has_acct else None
+            if arow:
+                metrics.update({"account_leverage": clean(arow[0]), "margin_call_level": clean(arow[1]),
+                                "stopout_level": clean(arow[2]), "stopped_out": int(arow[3] or 0),
+                                "stopout_time": (datetime.fromtimestamp(arow[4] / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
+                                                 if arow[4] else None),
+                                "stopout_closes": int(arow[5] or 0), "rejected_orders": int(arow[6] or 0)})
             res = {"ok": True,
                    "tester": {k: clean(v) for k, v in zip(keys, row[:8])},
                    "parameters": json.loads(row[8] or "{}"),

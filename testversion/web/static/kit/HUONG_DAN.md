@@ -19,6 +19,9 @@
 - Alpha chỉ đúng trên một khung nến thì khai báo `const REQUIRED_PERIOD: &str = "M5";`. Web chọn sẵn khung đó và
   cảnh báo nếu bạn chọn khung khác. Chạy sai khung thường ra 0 lệnh.
 - SL/TP là giá tuyệt đối và phải nằm đúng phía giá hiện tại; sai là run bị dừng.
+- Tài khoản mô phỏng: leverage mặc định 1:1000 (form chỉ cho chọn thấp hơn), margin call 100%, stop-out 50%.
+  Lệnh mới bị từ chối khi không đủ free margin. Margin level dưới 50% thì engine đóng lệnh lỗ lớn nhất trước rồi
+  dừng backtest của biến thể đó (biến thể bị loại). Crypto Binance (*_BN) không tính margin.
 - Dữ liệu chạy được (giai đoạn IS, đến 2024-01-01): 29 cặp FX, vàng/bạc, dầu Brent/WTI, 8 chỉ số, crypto (BTC, ETH,
   dữ liệu Binance *_BN). Alpha chạy cả symbol ngoài FX thì nên đặt SL/TP theo % giá hoặc ATR, không theo point FX.
 

@@ -69,7 +69,8 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
   - "Portfolio" (one shared account, one alpha instance per symbol): engine calls `on_bar_with_account` /
     `on_tick_with_account` (their default implementations forward to `on_bar` / `on_tick`).
     `AccountView` gives `symbol`, `balance`, `equity`, `used_margin`, `free_margin`, `positions_on_symbol`, `total_positions`.
-  If you only override the `*_with_account` methods, the alpha will not trade in Independent mode.
+  If you only override the `*_with_account` methods, the alpha will not trade in Independent mode, unless you also
+  override `fn wants_account(&self) -> bool { true }` (then Independent mode calls them with that symbol's own account).
 - The alpha is not told the symbol or its point size in Independent mode. The pattern
   `fn point_size(price: f64) -> f64 { if price >= 20.0 { 0.001 } else { 0.00001 } }` is only valid for FX
   (JPY pairs vs others). Symbols available besides FX: metals (XAUUSD, XAGUSD), energy (BRENTCMDUSD, LIGHTCMDUSD),
@@ -95,6 +96,29 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
 - `comment` must be a string literal (`&'static str`), it appears as the open/close reason in reports.
 - The engine does not tell the alpha when SL/TP closed a position (except `positions_on_symbol` in Portfolio mode).
   Track your own belief; Modify/Close on a closed position are harmless no-ops.
+
+## 4b. Account rules (margin call, stop-out)
+
+The engine simulates a broker account in USD. Defaults: leverage **1:1000**, margin call level **100%**,
+stop-out level **50%**. Binance crypto symbols (`*_BN`) are exempt: they use no margin and are never blocked.
+
+- Margin of a position (USD) = lots x contract size x current mid price x conversion to USD / leverage,
+  recomputed on every tick at the current price. Examples at 1:1000: EURUSD 1 lot at 1.10 = 110 USD;
+  USDJPY 1 lot = 100 USD at any price; XAUUSD 1 lot (100 oz) at 2000 = 200 USD.
+- Equity = balance + floating P/L. Free margin = equity - used margin. Margin level = equity / used margin x 100.
+- **New orders are rejected** (silently, the Open is ignored) if after opening free margin would be < 0 or
+  margin level < margin call level. Modify and Close are always allowed. Rejections are counted in the report.
+- **Stop-out**: checked on every tick. If margin level < stop-out level, the engine closes the position with the
+  largest loss first (reason `stop_out`), repeats until margin level is back above the level, then closes all
+  remaining positions (reason `stop_out_end`) and **the backtest of that variant ends** (no more trading,
+  equity stays flat to the end date). A stopped-out variant is a failed variant.
+- In Portfolio mode all symbols share one account; in Independent mode each symbol has its own account.
+- `AccountView` (Portfolio mode, or Independent with `wants_account() = true`) gives `equity`, `used_margin`,
+  `free_margin`, `leverage`, `contract_size`, `margin_call_level`, `stopout_level`: size positions from them
+  (e.g. risk a percent of equity) instead of a fixed lot when possible.
+- Optional: the alpha may declare stricter rules by overriding `account_leverage()` (e.g. `Some(100.0)` = 1:100),
+  `margin_call_level()` or `stopout_level()` (percent). Only stricter values are accepted on the platform
+  (leverage <= 1000, margin call >= 100, stop-out >= 50); looser values are ignored.
 
 ## 5. Safety rules (enforced by the automatic checker; a violation rejects the upload)
 
