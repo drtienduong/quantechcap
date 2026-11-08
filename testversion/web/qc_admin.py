@@ -5,6 +5,7 @@
   python qc_admin.py add-user EMAIL SLUG [--admin]  tạo tài khoản, in mật khẩu ngẫu nhiên MỘT LẦN
   python qc_admin.py passwd EMAIL                   đặt lại mật khẩu ngẫu nhiên
   python qc_admin.py list-users
+  python qc_admin.py set-os1 EMAIL 0|1              loại tài khoản: 0 = chỉ IS (loại 1), 1 = được chạy tới OS1 (loại 2)
 """
 import json
 import secrets
@@ -67,11 +68,20 @@ def cmd_passwd(email):
     print("Không có tài khoản" if not n else f"Mật khẩu mới (chỉ hiện một lần): {pw}")
 
 
+def cmd_set_os1(email, flag):
+    W.init_db()
+    con = W.db()
+    n = con.execute("update users set os1_access=? where email=?", (1 if flag == "1" else 0, email.strip().lower())).rowcount
+    con.commit()
+    con.close()
+    print("Không có tài khoản" if not n else f"{email}: os1_access={1 if flag == '1' else 0}")
+
+
 def cmd_list():
     W.init_db()
     con = W.db()
-    for r in con.execute("select email, slug, is_admin, created from users order by id"):
-        print(f"{r['email']:40} slug={r['slug']:20} admin={r['is_admin']} created={r['created']}")
+    for r in con.execute("select email, slug, is_admin, os1_access, created from users order by id"):
+        print(f"{r['email']:40} slug={r['slug']:20} admin={r['is_admin']} os1={r['os1_access']} created={r['created']}")
     con.close()
 
 
@@ -85,6 +95,8 @@ if __name__ == "__main__":
         cmd_add_user(a[1], a[2], "--admin" in a)
     elif a[:1] == ["passwd"] and len(a) == 2:
         cmd_passwd(a[1])
+    elif a[:1] == ["set-os1"] and len(a) == 3 and a[2] in ("0", "1"):
+        cmd_set_os1(a[1], a[2])
     elif a[:1] == ["list-users"]:
         cmd_list()
     else:

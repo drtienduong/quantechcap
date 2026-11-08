@@ -51,12 +51,15 @@ def symbols_info():
     """Cho giao diện: danh sách symbol theo thứ tự hiển thị."""
     return [{"symbol": s, "group": SYMBOLS[s][0], "point_value": SYMBOLS[s][1], "start": SYMBOLS[s][2], "swap": SYMBOLS[s][3]}
             for s in SYMBOL_ORDER]
-JOB_TYPES = ["optimize_is", "smoke"]
+JOB_TYPES = ["optimize_is", "smoke"]          # trader tạo trực tiếp qua form
+OS1_TYPE = "os1"                               # chỉ tạo qua trang "Alpha pass IS" (1 biến thể đã pass IS)
+DISPATCH_TYPES = JOB_TYPES + [OS1_TYPE]        # các loại job desk nhận
 
 DEFAULT_LIMITS = {
     "max_variants": 2000,        # số biến thể tối đa của một job optimize
     "max_variants_smoke": 20,
-    "is_end": "2024.01.01",      # job IS không được vượt mốc này (OS1 mở qua cổng riêng, chưa có ở bản thử)
+    "is_end": "2024.01.01",      # trader loại 1 (không có quyền OS1): job không được vượt mốc này
+    "os1_end": "2026.01.01",     # trader loại 2 (có quyền OS1) và job OS1: không vượt mốc này. OS2 không bao giờ chạy qua web
     "min_from": "2003.01.01",
     "smoke_max_days": 92,        # hàng smoke chạy song song với optimize nên phải ngắn
     "smoke_max_symbols": 3,
@@ -107,9 +110,12 @@ def _num(v, name, lo=None, hi=None):
     return x
 
 
-def validate_job(cfg, catalog, limits=None):
-    """Trả về (cfg_sạch, lỗi). catalog: {tên_tham_số: [start, step, stop]} của alpha được chọn (từ data-server)."""
+def validate_job(cfg, catalog, limits=None, os1_access=False):
+    """Trả về (cfg_sạch, lỗi). catalog: {tên_tham_số: [start, step, stop]} của alpha được chọn (từ data-server).
+    os1_access: trader loại 2 được chạy đến os1_end; loại 1 chỉ đến is_end."""
     lim = dict(DEFAULT_LIMITS, **(limits or {}))
+    if os1_access:
+        lim["is_end"] = lim["os1_end"]
     errs = []
     if not isinstance(cfg, dict):
         return None, ["cấu hình phải là object"]
@@ -152,7 +158,8 @@ def validate_job(cfg, catalog, limits=None):
         if fd < _date(lim["min_from"]):
             errs.append(f"fromdate phải >= {lim['min_from']}")
         if td > _date(lim["is_end"]):
-            errs.append(f"todate phải <= {lim['is_end']} (job IS không được chạm OS1/OS2)")
+            errs.append(f"todate phải <= {lim['is_end']}" + (" (không được chạm OS2)" if os1_access
+                        else " (tài khoản của bạn chỉ chạy IS; OS1 chạy qua trang Alpha pass IS)"))
         if fd >= td:
             errs.append("fromdate phải trước todate")
         late = [s for s in out["symbols"] if _date(SYMBOLS[s][2]) >= td]
@@ -273,3 +280,41 @@ def parse_tester_inputs(ini_text):
                 except ValueError:
                     pass
     return out
+
+
+# ---------- OS1: cùng công thức với rq_eval.py (tools dùng chung của trader) ----------
+OS1_IS_END, OS1_OS_END = "20240101", "20260101"
+OS_RATIO = 0.7
+CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "BTCUSDT_BN", "ETHUSDT_BN"}
+ANN_FX, ANN_CRYPTO = 260, 365
+
+
+def eq_sharpe(eq, ann=ANN_FX):
+    r = [eq[i] / eq[i - 1] - 1 for i in range(1, len(eq)) if eq[i - 1] > 0]
+    if len(r) < 2:
+        return 0.0
+    m = sum(r) / len(r)
+    sd = math.sqrt(sum((x - m) ** 2 for x in r) / len(r))
+    return m / sd * math.sqrt(ann) if sd > 0 else 0.0
+
+
+def os1_eval(daily, crypto=False, is_end=OS1_IS_END, os_end=OS1_OS_END):
+    """daily: [(yyyymmdd, balance, equity, drawdown)] của một run liền IS -> OS1.
+    Tiêu chí OS1 (Dương duyệt): có đỉnh balance mới, DD OS1 không vượt DD lớn nhất của IS, Sharpe OS1 > 0.7 x Sharpe IS."""
+    ann = ANN_CRYPTO if crypto else ANN_FX
+    isr = [x for x in daily if x[0] < is_end]
+    osr = [x for x in daily if is_end <= x[0] < os_end]
+    if not isr or not osr:
+        return {"os_ok": False, "os_note": "không có dữ liệu IS hoặc OS1"}
+    sh = eq_sharpe([x[2] for x in isr], ann)
+    os_sh = eq_sharpe([isr[-1][2]] + [x[2] for x in osr], ann)
+    new_high = max(x[1] for x in osr) > max(x[1] for x in isr)
+    no_dd = max(x[3] for x in osr) <= max(x[3] for x in isr)
+    enough = len(osr) > 100
+    res = {"os_ok": enough, "is_sharpe": round(sh, 3), "os_sharpe": round(os_sh, 3), "os_new_high": new_high,
+           "os_no_new_dd": no_dd, "os_profit": round(osr[-1][1] - isr[-1][1], 2), "os_days": len(osr),
+           "os_max_dd": round(max(x[3] for x in osr), 2), "is_max_dd": round(max(x[3] for x in isr), 2),
+           "os_pass": bool(enough and new_high and no_dd and os_sh > OS_RATIO * sh)}
+    if not enough:
+        res["os_note"] = "OS1 quá ngắn (cần > 100 ngày có dữ liệu)"
+    return res

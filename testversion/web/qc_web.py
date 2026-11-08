@@ -120,6 +120,16 @@ def init_db():
         con.execute("alter table jobs add column progress_at real")
     if "meta_json" not in {r[1] for r in con.execute("pragma table_info(alphas)")}:
         con.execute("alter table alphas add column meta_json text")
+    ucols = {r[1] for r in con.execute("pragma table_info(users)")}
+    if "os1_access" not in ucols:   # 0 = trader loại 1 (chỉ IS), 1 = loại 2 (được chạy tới OS1)
+        con.execute("alter table users add column os1_access integer default 0")
+    jcols = {r[1] for r in con.execute("pragma table_info(jobs)")}
+    if "src_job_id" not in jcols:   # job OS1: biến thể nguồn (job IS + run)
+        con.execute("alter table jobs add column src_job_id integer")
+        con.execute("alter table jobs add column src_run_id integer")
+    # mỗi biến thể chỉ chạy OS1 một lần (job lỗi/hủy trước khi có kết quả thì được nộp lại)
+    con.execute("create unique index if not exists ux_os1_src on jobs(src_job_id, src_run_id) "
+                "where type='os1' and status not in ('failed','cancelled')")
     vcols = {r[1] for r in con.execute("pragma table_info(variants)")}
     if "stopped_out" not in vcols:
         con.execute("alter table variants add column stopped_out integer default 0")
@@ -314,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
         m = c.get("qc_session")
         if not m:
             return None
-        s = con.execute("select s.token, s.csrf, s.expires, u.id, u.email, u.slug, u.is_admin "
+        s = con.execute("select s.token, s.csrf, s.expires, u.id, u.email, u.slug, u.is_admin, u.os1_access "
                         "from sessions s join users u on u.id=s.user_id where s.token=?", (m.value,)).fetchone()
         if not s or s["expires"] < time.time():
             return None
@@ -462,6 +472,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "email": s["email"], "slug": s["slug"], "csrf": s["csrf"],
                                        "desk_notice": offline_note(con, "Job và bản nộp alpha"),
                                        "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
+                                       "os1_access": bool(s["os1_access"]),
+                                       "todate_max": LIMITS["os1_end"] if s["os1_access"] else LIMITS["is_end"],
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "symbols": C.symbols_info(), "groups": C.GROUPS, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
             if parts == ["alphas"]:
@@ -473,13 +485,18 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["jobs"] and method == "GET":
                 off = max(0, int(q.get("offset", ["0"])[0]))
                 lim = min(100, max(1, int(q.get("limit", ["30"])[0])))
-                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json from jobs "
-                                   "where user_id=? order by id desc limit ? offset ?", (uid, lim, off)).fetchall()
-                total = con.execute("select count(*) from jobs where user_id=?", (uid,)).fetchone()[0]
+                kind = "type='os1'" if q.get("kind", [""])[0] == "os1" else "type!='os1'"
+                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json,src_job_id,src_run_id "
+                                   f"from jobs where user_id=? and {kind} order by id desc limit ? offset ?", (uid, lim, off)).fetchall()
+                total = con.execute(f"select count(*) from jobs where user_id=? and {kind}", (uid,)).fetchone()[0]
                 return self.send_json({"ok": True, "total": total,
                                        "jobs": [dict(self.job_row(r), notice=job_notice(con, r)) for r in rows]})
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
+            if parts == ["ispass"] and method == "GET":
+                return self.ispass_list(con, uid, q)
+            if parts == ["os1"] and method == "POST":
+                return self.create_os1(con, uid)
             if parts == ["submissions"] and method == "POST":
                 return self.create_submission(con, uid, s["slug"])
             if parts == ["submissions"] and method == "GET":
@@ -529,13 +546,89 @@ class Handler(BaseHTTPRequestHandler):
         a = con.execute("select params_json from alphas where user_id=? and name=?", (uid, cfg["alpha"])).fetchone()
         if not a:
             return self.fail(400, "alpha không có trong danh sách của bạn (data-server chưa đồng bộ?)")
-        clean, errs = C.validate_job(cfg, json.loads(a["params_json"]), LIMITS)
+        os1_access = bool(con.execute("select os1_access from users where id=?", (uid,)).fetchone()[0])
+        clean, errs = C.validate_job(cfg, json.loads(a["params_json"]), LIMITS, os1_access=os1_access)
         if errs:
             return self.send_json({"ok": False, "error": "cấu hình không hợp lệ", "details": errs}, 400)
         cur = con.execute("insert into jobs(user_id,type,alpha,config_json,status,created,last_update) values(?,?,?,?,?,?,?)",
                           (uid, clean["type"], clean["alpha"], json.dumps(clean), "queued", now_iso(), time.time()))
         con.commit()
         self.send_json({"ok": True, "id": cur.lastrowid})
+
+    ISPASS_SQL = ("from variants v join jobs j on j.id=v.job_id where j.user_id=? and j.type='optimize_is' "
+                  "and j.status='done' and v.is_pass=1 and coalesce(v.stopped_out,0)=0")
+
+    def ispass_list(self, con, uid, q):
+        """Trang Alpha pass IS: mọi biến thể pass IS (không stop-out) của trader, kèm trạng thái OS1 của từng biến thể."""
+        off = max(0, int(q.get("offset", ["0"])[0]))
+        lim = min(100, max(1, int(q.get("limit", ["20"])[0])))
+        total = con.execute("select count(*) " + self.ISPASS_SQL, (uid,)).fetchone()[0]
+        rows = con.execute("select v.job_id, v.run_id, v.symbol, v.params_json, v.trades, v.net_profit, v.dd_pct, v.pf, "
+                           "v.sharpe, v.recent_sharpe, v.fitness, v.tit, j.alpha, j.config_json, j.finished "
+                           + self.ISPASS_SQL + " order by j.id desc, v.fitness desc, v.run_id limit ? offset ?",
+                           (uid, lim, off)).fetchall()
+        out = []
+        for r in rows:
+            cfg = json.loads(r["config_json"] or "{}")
+            o = con.execute("select id, status, summary_json from jobs where user_id=? and type='os1' and src_job_id=? "
+                            "and src_run_id=? order by id desc limit 1", (uid, r["job_id"], r["run_id"])).fetchone()
+            os1 = None
+            if o:
+                sm = json.loads(o["summary_json"]) if o["summary_json"] else {}
+                os1 = {"job_id": o["id"], "status": o["status"], "os_pass": (sm.get("os1") or {}).get("os_pass")}
+            out.append({"job_id": r["job_id"], "run_id": r["run_id"], "symbol": r["symbol"], "alpha": r["alpha"],
+                        "period": cfg.get("period"), "fromdate": cfg.get("fromdate"), "todate": cfg.get("todate"),
+                        "params": json.loads(r["params_json"] or "{}"),
+                        "opt_keys": [k for k, v in (cfg.get("params") or {}).items() if isinstance(v, list) and len(v) == 3 and v[1]],
+                        "trades": r["trades"], "net_profit": r["net_profit"], "dd_pct": r["dd_pct"], "pf": r["pf"],
+                        "sharpe": r["sharpe"], "recent_sharpe": r["recent_sharpe"], "fitness": r["fitness"], "tit": r["tit"],
+                        "finished": r["finished"], "os1": os1})
+        return self.send_json({"ok": True, "total": total, "offset": off, "rows": out})
+
+    def create_os1(self, con, uid):
+        """Nộp các biến thể đã pass IS để chạy OS1. Mỗi biến thể chỉ một lần (trừ khi lần trước lỗi/hủy).
+        Data-server kiểm lại độc lập (biến thể có pass IS không) và tự dựng cấu hình từ report IS."""
+        try:
+            body = self.read_json()
+        except Exception:
+            return self.fail(400, "JSON không hợp lệ")
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list) or not items or len(items) > 50:
+            return self.fail(400, "chọn từ 1 đến 50 biến thể")
+        created, skipped = [], []
+        for it in items:
+            try:
+                sj, sr = int(it["job_id"]), int(it["run_id"])
+            except (KeyError, TypeError, ValueError):
+                return self.fail(400, "mục không hợp lệ")
+            v = con.execute("select v.symbol, v.params_json, j.alpha, j.config_json " + self.ISPASS_SQL +
+                            " and v.job_id=? and v.run_id=?", (uid, sj, sr)).fetchone()
+            if not v:
+                skipped.append({"job_id": sj, "run_id": sr, "reason": "không phải biến thể pass IS của bạn"})
+                continue
+            cfg = json.loads(v["config_json"] or "{}")
+            if (cfg.get("todate") or "") > LIMITS["is_end"]:
+                skipped.append({"job_id": sj, "run_id": sr, "reason": "job gốc đã chạy qua 2024-01-01"})
+                continue
+            prev = con.execute("select id from jobs where user_id=? and type='os1' and src_job_id=? and src_run_id=? "
+                               "and status not in ('failed','cancelled')", (uid, sj, sr)).fetchone()
+            if prev:
+                skipped.append({"job_id": sj, "run_id": sr, "reason": f"đã chạy OS1 (job #{prev['id']})"})
+                continue
+            ocfg = {"type": "os1", "alpha": v["alpha"], "src_job_id": sj, "src_run_id": sr, "symbol": v["symbol"],
+                    "params": json.loads(v["params_json"] or "{}"), "period": cfg.get("period"),
+                    "symbols_mode": cfg.get("symbols_mode"), "symbols": cfg.get("symbols"),
+                    "fromdate": cfg.get("fromdate"), "todate": LIMITS["os1_end"], "src_todate": cfg.get("todate")}
+            try:
+                cur = con.execute("insert into jobs(user_id,type,alpha,config_json,status,created,last_update,src_job_id,src_run_id) "
+                                  "values(?,?,?,?,?,?,?,?,?)", (uid, "os1", v["alpha"], json.dumps(ocfg), "queued", now_iso(),
+                                                                time.time(), sj, sr))
+            except sqlite3.IntegrityError:
+                skipped.append({"job_id": sj, "run_id": sr, "reason": "đã chạy OS1"})
+                continue
+            created.append(cur.lastrowid)
+        con.commit()
+        return self.send_json({"ok": True, "created": created, "skipped": skipped})
 
     def create_submission(self, con, uid, slug):
         """Trader nộp MÃ NGUỒN alpha. Web chỉ giữ mã tới khi data-server kéo về (rồi xóa). Không biên dịch/chạy gì ở đây."""
@@ -673,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             lanes = {x for x in q.get("accept", [""])[0].split(",") if x in ("heavy", "smoke")}
         else:   # desk bản cũ
             lanes = {"heavy", "smoke"} if q.get("accept_jobs", ["1"])[0] == "1" else set()
-        types = [t for t in C.JOB_TYPES if ("smoke" if t == "smoke" else "heavy") in lanes]
+        types = [t for t in C.DISPATCH_TYPES if ("smoke" if t == "smoke" else "heavy") in lanes]
         accept_sub = q.get("accept_sub", ["0"])[0] == "1"
         end = time.time() + wait
         while True:

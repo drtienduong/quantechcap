@@ -41,13 +41,17 @@ DATA_FOLDER = CFG["data_folder"]
 SWAP_FOLDER = CFG["swap_folder"]
 LIMITS = dict(C.DEFAULT_LIMITS, **CFG.get("limits", {}))
 # auto_approve: CHỈ Dương bật trong desk_config.json (data-server là nơi quyết định, không tin cờ nào từ web)
-TRADERS = {slug: {"dir": Path(t["dir"]).resolve(), "name": t["name"], "auto_approve": t.get("auto_approve") is True}
+# os1_access: trader loại 2 (được chạy job tới os1_end). Cũng CHỈ Dương bật trong desk_config.json.
+TRADERS = {slug: {"dir": Path(t["dir"]).resolve(), "name": t["name"], "auto_approve": t.get("auto_approve") is True,
+                  "os1_access": t.get("os1_access") is True}
            for slug, t in CFG["traders"].items()}
 RUNNER_TEMPLATE = Path(CFG.get("runner_template") or Path(RQ_ROOT) / "backtest-optimzie-rust-tool" / "src" / "runner_template.rs")
 SMOKE_TIMEOUT_MIN = float(CFG.get("smoke_timeout_min", 20))
 STATE = Path(CFG.get("state_dir") or HERE / "state")
 STATE.mkdir(exist_ok=True)
 JOBS_FILE = STATE / "jobs.json"
+OS1_FILE = STATE / "os1_jobs.json"     # job OS1 đang/đã chạy: nguồn IS, tham số, cờ crypto
+OS1_LEDGER = Path(CFG.get("os1_ledger") or r"D:\quantechcap-data-research\os1_ledger.csv")
 
 heavy_busy = threading.Event()   # đang chạy optimize (hàng nặng)
 smoke_busy = threading.Event()   # đang chạy smoke (hàng nhanh, chạy song song với hàng nặng)
@@ -142,11 +146,191 @@ def jobs_index():
         return {}
 
 
-def jobs_save(jid, slug, run_dir):
+def jobs_save(jid, slug, run_dir, kind=None):
     with _jobs_lock:
         d = jobs_index()
-        d[str(jid)] = {"slug": slug, "run_dir": str(run_dir)}
+        d[str(jid)] = {"slug": slug, "run_dir": str(run_dir), **({"kind": kind} if kind else {})}
         JOBS_FILE.write_text(json.dumps(d, indent=1), encoding="utf-8")
+
+
+# ---------- OS1 ----------
+class JobError(Exception):
+    """Lỗi có thông điệp dành cho trader."""
+
+
+def os1_index():
+    try:
+        return json.loads(OS1_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def os1_save(jid, info):
+    with _jobs_lock:
+        d = os1_index()
+        d[str(jid)] = info
+        OS1_FILE.write_text(json.dumps(d, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def os1_ledger(event, jid, slug, info, result=None):
+    """Sổ ghi mọi lần mở OS1 (ai, alpha, biến thể nguồn, tham số, lúc nào, kết quả). Chỉ ghi thêm."""
+    import csv
+    try:
+        new = not OS1_LEDGER.exists()
+        OS1_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with OS1_LEDGER.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["time_utc", "event", "job", "trader", "alpha", "src_job", "src_run", "symbol", "params", "result"])
+            w.writerow([datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), event, jid, slug, info.get("alpha"),
+                        info.get("src_job_id"), info.get("src_run_id"), info.get("symbol"),
+                        json.dumps(info.get("params", {}), sort_keys=True), json.dumps(result or {}, ensure_ascii=False)])
+    except Exception as e:  # noqa: BLE001
+        log("ghi sổ OS1 lỗi", repr(e))
+
+
+def ini_value(text, key):
+    for line in text.splitlines():
+        k, _, v = line.partition("=")
+        if k.strip().lower() == key:
+            return v.split(";")[0].strip()
+    return ""
+
+
+def prepare_os1(jid, slug, t, cfg):
+    """Dựng run OS1 từ CHÍNH report IS gốc (không tin web): kiểm biến thể pass IS, lấy tham số, bản alpha.rs
+    đã chạy và ini gốc; chỉ đổi todate -> os1_end. Trả (tên alpha, đường dẫn alpha, đường dẫn ini)."""
+    try:
+        src_job, src_run = int(cfg["src_job_id"]), int(cfg["src_run_id"])
+    except (KeyError, TypeError, ValueError):
+        raise JobError("Yêu cầu OS1 không hợp lệ.")
+    entry = jobs_index().get(str(src_job))
+    if not entry or entry.get("slug") != slug or entry.get("kind") == "os1":
+        raise JobError(f"Không tìm thấy kết quả IS của job #{src_job} trên data-server.")
+    run_dir = Path(entry["run_dir"]).resolve()
+    if t["dir"] not in run_dir.parents or not (run_dir / "data" / "results.sqlite").is_file():
+        raise JobError(f"Không tìm thấy kết quả IS của job #{src_job} trên data-server.")
+    v = {x["run_id"]: x for x in collect_variants(run_dir)}.get(src_run)
+    if not v or not v["is_pass"] or v.get("stopped_out"):
+        raise JobError("Biến thể này không pass IS theo kết quả trên data-server nên không được chạy OS1.")
+    con = sqlite3.connect(f"file:{run_dir / 'data' / 'results.sqlite'}?mode=ro", uri=True)
+    try:
+        row = con.execute("select symbol, parameters_json, todate from input where run_id=?", (src_run,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        raise JobError("Không đọc được biến thể nguồn.")
+    symbol, params = row[0], json.loads(row[1] or "{}")
+    if (row[2] or "").replace(".", "") > C.OS1_IS_END:
+        raise JobError("Job gốc đã chạy qua 2024-01-01, kết quả OS1 đã có trong chính job đó.")
+    src_ini = (run_dir / "input-optimize.ini").read_text(encoding="utf-8", errors="replace")
+    alpha = ini_value(src_ini, "alpha_name")
+    if not C.NAME_RE.match(alpha) or not alpha.endswith("_" + t["name"]) or not (run_dir / "alpha.rs").is_file():
+        raise JobError("Report IS gốc thiếu thông tin alpha.")
+    symbols = ini_value(src_ini, "symbols")
+    portfolio = symbols.lower().startswith("portfolio:")
+    if not portfolio and symbol and symbol.upper() != "ALLSYMBOL":
+        symbols = symbol                       # chế độ từng symbol: chỉ chạy symbol của biến thể
+    sym_set = {x.strip().upper() for x in (symbols[10:] if portfolio else symbols).split(",") if x.strip()}
+    crypto = bool(sym_set) and sym_set <= C.CRYPTO_SYMBOLS
+    forced = {"todate": LIMITS["os1_end"], "data_folder": DATA_FOLDER, "swap_folder": SWAP_FOLDER, "symbols": symbols,
+              "margin_call_level": str(C.MARGIN_CALL_LEVEL), "stopout_level": str(C.STOPOUT_LEVEL),
+              "alpha_account_rules": "stricter"}
+    out, seen, section = [], set(), ""
+    for line in src_ini.splitlines():
+        st = line.strip()
+        if st.startswith("["):
+            if section == "[tester]":
+                out += [f"{k} = {v}" for k, v in forced.items() if k not in seen]
+            section = st.lower()
+            out.append(line)
+            if section == "[testerinputs]":
+                out += [f"{k} = {C.fnum(x)},0,{C.fnum(x)}" for k, x in params.items()]
+            continue
+        if section == "[testerinputs]":
+            continue
+        k = line.partition("=")[0].strip().lower()
+        if section == "[tester]" and k in forced:
+            out.append(f"{k} = {forced[k]}")
+            seen.add(k)
+            continue
+        out.append(line)
+    jdir = t["dir"] / "work" / "os1" / f"job_{jid}"
+    jdir.mkdir(parents=True, exist_ok=True)
+    alpha_path = jdir / f"{alpha}.rs"
+    alpha_path.write_bytes((run_dir / "alpha.rs").read_bytes())       # đúng bản alpha đã pass IS
+    ini = jdir / "input-optimize.ini"
+    ini.write_text("\n".join(out) + "\n", encoding="utf-8")
+    info = {"src_job_id": src_job, "src_run_id": src_run, "alpha": alpha, "symbol": symbol, "params": params,
+            "crypto": crypto, "src_run_dir": str(run_dir)}
+    os1_save(jid, info)
+    os1_ledger("start", jid, slug, info)
+    return alpha, alpha_path, ini
+
+
+def ms_of(yyyymmdd):
+    return int(datetime.strptime(yyyymmdd, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def os1_pick_run(con, info):
+    rows = con.execute("select run_id, symbol from input order by run_id").fetchall()
+    want = (info.get("symbol") or "").upper()
+    for rid, sym in rows:
+        if (sym or "").upper() == want:
+            return rid
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def os1_compute(con, rid, info):
+    """Kết quả OS1 của một run liền IS -> OS1: tiêu chí + thống kê lệnh mở từ 2024-01-01."""
+    daily = con.execute("select date,balance,equity,drawdown from daily_equity where run_id=? order by date", (rid,)).fetchall()
+    e = C.os1_eval(daily, crypto=info.get("crypto", False))
+    t0 = ms_of(C.OS1_IS_END)
+    n, wins, gp, gl = con.execute("select count(*), sum(case when profit>0 then 1 else 0 end), "
+                                  "sum(case when profit>0 then profit else 0 end), sum(case when profit<0 then profit else 0 end) "
+                                  "from trade_info where run_id=? and open_time_ms>=?", (rid, t0)).fetchone()
+    dep = con.execute("select deposit from input where run_id=?", (rid,)).fetchone()[0] or 0
+    stopped, rej = False, 0
+    if con.execute("select count(*) from sqlite_master where type='table' and name='account_rules'").fetchone()[0]:
+        a = con.execute("select stopped_out, rejected_orders from account_rules where run_id=?", (rid,)).fetchone()
+        if a:
+            stopped, rej = bool(a[0]), int(a[1] or 0)
+    e.update(os_trades=n or 0, os_winrate=round(100.0 * (wins or 0) / n, 2) if n else None,
+             os_profit_factor=round((gp or 0) / abs(gl), 3) if gl else None, os_gross_profit=round(gp or 0, 2),
+             os_gross_loss=round(gl or 0, 2), os_dd_pct=round(100.0 * e["os_max_dd"] / dep, 2) if dep and "os_max_dd" in e else None,
+             stopped_out=stopped, rejected_orders=rej)
+    if stopped:
+        e["os_pass"] = False
+    return e
+
+
+def finish_os1(jid, slug, t, st, t0, info):
+    run_dir = Path(st["run_dir"]).resolve()
+    if t["dir"] not in run_dir.parents:
+        return upd(jid, status="failed", message="Kết quả nằm sai chỗ trên data-server. Báo quản trị kèm số job.")
+    upd(jid, message="Run OS1 xong, đang gửi kết quả lên web")
+    con = sqlite3.connect(f"file:{run_dir / 'data' / 'results.sqlite'}?mode=ro", uri=True)
+    try:
+        rid = os1_pick_run(con, info)
+        if rid is None:
+            return upd(jid, status="failed", message="Không đọc được kết quả OS1. Báo quản trị kèm số job.")
+        e = os1_compute(con, rid, info)
+    finally:
+        con.close()
+    jobs_save(jid, slug, run_dir, kind="os1")
+    os1_save(jid, dict(info, run_id=rid, result=e))
+    variant = {"run_id": rid, "symbol": info.get("symbol"), "params": info.get("params", {}), "trades": e.get("os_trades"),
+               "net_profit": e.get("os_profit"), "dd_pct": e.get("os_dd_pct"), "pf": e.get("os_profit_factor"),
+               "winrate": e.get("os_winrate"), "sharpe": e.get("os_sharpe"), "tit": None, "fitness": None, "recovery": None,
+               "is_pass": bool(e.get("os_pass")), "recent_sharpe": None, "stopped_out": e.get("stopped_out"),
+               "rejected_orders": e.get("rejected_orders")}
+    summary = {"variants": 1, "is_pass": int(bool(e.get("os_pass"))), "minutes": round((time.time() - t0) / 60, 1),
+               "report": str(run_dir.relative_to(t["dir"])),
+               "os1": dict(e, src_job_id=info.get("src_job_id"), src_run_id=info.get("src_run_id"))}
+    api("POST", f"/api/desk/jobs/{jid}/result", {"variants": [variant], "final": True, "summary": summary}, timeout=120)
+    os1_ledger("done", jid, slug, info, {k: e.get(k) for k in ("os_pass", "os_sharpe", "is_sharpe", "os_profit",
+                                                              "os_new_high", "os_no_new_dd", "stopped_out")})
+    log(f"job {jid} OS1 xong: pass={e.get('os_pass')}")
 
 
 # ---------- chạy job ----------
@@ -291,6 +475,9 @@ def run_job(job):
         if not t:
             return fail("Tài khoản của bạn chưa được cấu hình trên data-server. Báo quản trị.")
         cfg = job["config"]
+        if cfg.get("type") == C.OS1_TYPE:
+            alpha, alpha_path, ini = prepare_os1(jid, slug, t, cfg)
+            return start_and_monitor(jid, slug, t, alpha, alpha_path, ini, False, lane, fail)
         alpha = cfg.get("alpha", "")
         cat = _catalog.get(slug, {}).get(alpha)
         if cat is None:
@@ -298,7 +485,7 @@ def run_job(job):
             cat = _catalog.get(slug, {}).get(alpha)
         if cat is None:
             return fail("Alpha không còn trên data-server. Kiểm tra trang Alpha hoặc nộp lại alpha.")
-        clean_cfg, errs = C.validate_job(cfg, cat, LIMITS)     # KHÔNG tin web
+        clean_cfg, errs = C.validate_job(cfg, cat, LIMITS, os1_access=t["os1_access"])     # KHÔNG tin web
         if errs:
             return fail("Cấu hình bị data-server từ chối: " + "; ".join(errs) + ". Sửa cấu hình rồi gửi lại.")
         alpha_file = alpha + ".rs"
@@ -309,10 +496,21 @@ def run_job(job):
         jdir.mkdir(parents=True, exist_ok=True)
         ini = jdir / "input-optimize.ini"
         ini.write_text(C.build_ini(clean_cfg, alpha_file, DATA_FOLDER, SWAP_FOLDER), encoding="utf-8")
+        return start_and_monitor(jid, slug, t, alpha, alpha_path, ini, clean_cfg["type"] == "smoke", lane, fail)
+    except JobError as e:
+        fail(str(e))
+    except Exception as e:  # noqa: BLE001
+        fail("Lỗi phía data-server: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:300] + ". Hãy chạy lại; nếu lặp lại, báo quản trị.")
+    finally:
+        lane.clear()
+
+
+def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail):
+    """Khởi động run qua rq_run (chờ nếu run khác đang chạy) rồi theo dõi đến khi xong."""
+    if True:
         env = dict(os.environ, RQ_ROOT=RQ_ROOT, TRADER_DIR=str(t["dir"]), TRADER_NAME=t["name"])
         cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
                "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
-        smoke = clean_cfg["type"] == "smoke"
         timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
         if smoke:
             cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
@@ -352,10 +550,6 @@ def run_job(job):
                 return upd(jid, status="cancelled", message="Đã hủy trước khi chạy")
             time.sleep(20)
         monitor_job(jid, slug, t, status_path, time.time(), timeout_min)
-    except Exception as e:  # noqa: BLE001
-        fail("Lỗi phía data-server: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:300] + ". Hãy chạy lại; nếu lặp lại, báo quản trị.")
-    finally:
-        lane.clear()
 
 
 def monitor_job(jid, slug, t, status_path, t0, timeout_min):
@@ -402,6 +596,9 @@ def monitor_job(jid, slug, t, status_path, t0, timeout_min):
 
 
 def finish_job(jid, slug, t, st, t0):
+    info = os1_index().get(str(jid))
+    if info:
+        return finish_os1(jid, slug, t, st, t0, info)
     run_dir = Path(st["run_dir"]).resolve()
     if t["dir"] not in run_dir.parents:
         log(f"job {jid}: thư mục kết quả ngoài workspace trader")
@@ -572,14 +769,18 @@ def handle_request(req):
         if t["dir"] not in run_dir.parents:
             raise ValueError("đường dẫn không hợp lệ")
         db = run_dir / "data" / "results.sqlite"
+        os1 = entry.get("kind") == "os1"
+        os1_info = os1_index().get(str(jid), {}) if os1 else {}
+        t_from = ms_of(C.OS1_IS_END) if os1 else 0          # job OS1: trader chỉ thấy phần OS1
+        d_from = C.OS1_IS_END if os1 else "0"
         run_id, offset = int(pl["run_id"]), max(0, int(pl.get("offset", 0)))
         limit = min(100, int(pl.get("limit", 100)))
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         if kind == "trades":
-            total = con.execute("select count(*) from trade_info where run_id=?", (run_id,)).fetchone()[0]
+            total = con.execute("select count(*) from trade_info where run_id=? and open_time_ms>=?", (run_id, t_from)).fetchone()[0]
             rows = con.execute("select trade_id,symbol,side,open_time_ms,open_price,close_time_ms,close_price,lots,profit,commission,"
-                               "reason_open,reason_close from trade_info where run_id=? order by trade_id limit ? offset ?",
-                               (run_id, limit, offset)).fetchall()
+                               "reason_open,reason_close from trade_info where run_id=? and open_time_ms>=? order by trade_id limit ? offset ?",
+                               (run_id, t_from, limit, offset)).fetchall()
             keys = ["trade_id", "symbol", "side", "open_time_ms", "open_price", "close_time_ms", "close_price", "lots", "profit",
                     "commission", "reason_open", "reason_close"]
             res = {"ok": True, "total": total, "offset": offset, "rows": [{k: clean(v) for k, v in zip(keys, r)} for r in rows]}
@@ -591,6 +792,16 @@ def handle_request(req):
                 raise ValueError("không có run này")
             mcols = [d[0] for d in con.execute("select * from metrics limit 0").description]
             keys = ["symbol", "period", "deposit", "leverage", "fromdate", "todate", "swap_mode", "commission_per_trade"]
+            if os1:
+                # job OS1: KHÔNG trả chỉ số toàn kỳ (lẫn IS); chỉ chỉ số OS1 tính riêng
+                e = os1_compute(con, run_id, os1_info)
+                tester = {k: clean(v) for k, v in zip(keys, row[:8])}
+                tester["fromdate"] = "2024.01.01 (OS1; run liền từ " + str(row[4]) + ")"
+                res = {"ok": True, "tester": tester, "parameters": json.loads(row[8] or "{}"),
+                       "metrics": {k: (clean(v) if isinstance(v, float) else v) for k, v in e.items()}}
+                con.close()
+                api("POST", f"/api/desk/requests/{rid}/result", res, timeout=60)
+                return
             metrics = {k: clean(v) for k, v in zip(mcols, mrow) if k != "run_id"}
             # thống kê theo chiều lệnh (long/short): số lệnh và % lệnh có lãi
             side = {"long": (0, 0), "short": (0, 0)}
@@ -616,7 +827,8 @@ def handle_request(req):
                    "parameters": json.loads(row[8] or "{}"),
                    "metrics": metrics}
         elif kind == "equity":
-            rows = con.execute("select date,balance,equity,drawdown from daily_equity where run_id=? order by date", (run_id,)).fetchall()
+            rows = con.execute("select date,balance,equity,drawdown from daily_equity where run_id=? and date>=? order by date",
+                               (run_id, d_from)).fetchall()
             n = len(rows)
             step = max(1, n // 600)
             pts = rows[::step]
