@@ -548,8 +548,10 @@ def collect_variants(run_dir: Path):
         for rid, so, rej in con.execute("select run_id, stopped_out, rejected_orders from account_rules"):
             acct[rid] = (bool(so), int(rej or 0))
     out = []
-    q = ("select i.run_id,i.symbol,i.parameters_json,m.trades,m.net_profit,m.max_drawdown_pct,m.profit_factor,m.winrate,"
-         "m.custom_sharpe,m.time_in_trade_percent,m.fitness,m.recovery_factor from input i join metrics m on m.run_id=i.run_id order by i.run_id")
+    mcols = {r[1] for r in con.execute("pragma table_info(metrics)")}   # report rất cũ có thể thiếu cột
+    sel = ",".join(f"m.{c}" if c in mcols else "NULL" for c in ("trades", "net_profit", "max_drawdown_pct", "profit_factor", "winrate",
+                                                                 "custom_sharpe", "time_in_trade_percent", "fitness", "recovery_factor"))
+    q = ("select i.run_id,i.symbol,i.parameters_json," + sel + " from input i join metrics m on m.run_id=i.run_id order by i.run_id")
     for r in con.execute(q):
         ip, rs = evalmap.get(r[0], (False, None))
         so, rej = acct.get(r[0], (False, 0))
