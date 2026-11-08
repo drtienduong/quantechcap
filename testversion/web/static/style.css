@@ -53,9 +53,63 @@ table.vwt th{position:sticky;top:0;background:#f7f8fa;color:#1d2433;font-size:12
 @media(max-width:1180px){.vw{grid-template-columns:280px minmax(420px,1fr)}.vwdet{grid-column:1/-1}.vwcards{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:820px){.vw{display:block}.vwside,.vwmain,.vwdet{margin-top:10px}.vwcards{grid-template-columns:repeat(2,1fr)}}
 .vwbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;padding:6px 12px;background:#fff;border:1px solid #d9dee5;border-radius:8px;font-size:13px}
-.vwbar span:last-child::before{content:", ";color:#68717d}
+.vwbar span:last-child::before{content:"· ";color:#68717d}
 a.btn{display:inline-block;text-decoration:none}
 .banner{background:#fff4d6;color:#7a4b00;border-bottom:1px solid #f0d58a;padding:8px 18px;font-size:13px}
 td.small{font-size:12px;max-width:380px}
 .warnbox{border:1px solid #f0d58a;border-radius:8px;margin:0 0 12px}
 .symgroup{margin:3px 0}.symbox{max-height:260px}
+
+/* ===== Responsive: điện thoại thường, Z Fold màn ngoài (~412px), Z Fold mở (~840-930px) ===== */
+header{flex-wrap:wrap;row-gap:6px}
+#nav{display:flex;gap:2px;min-width:0}
+#nav a{white-space:nowrap}
+.card{overflow-x:auto}
+.pager{flex-wrap:wrap}
+.vwbar{overflow-wrap:anywhere}
+canvas.vwc{height:300px}
+@media(max-width:1000px){
+  header{padding:8px 12px;gap:10px}
+  #nav{order:3;flex:1 1 100%;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:2px}
+  #nav::-webkit-scrollbar{display:none}
+  #nav a{padding:7px 10px}
+  main{margin:12px auto;padding:0 10px}
+  main.wide{padding:0 8px}
+}
+@media(max-width:640px){
+  body{font-size:15px}
+  header .brand{font-size:15px;margin-right:0}
+  #who{display:none}
+  .badge{font-size:11px;padding:2px 7px}
+  header .btn{padding:5px 10px}
+  h2{font-size:20px}
+  .card{padding:12px 10px;border-radius:9px}
+  .banner{padding:8px 12px}
+  input,select{font-size:16px;min-height:38px}
+  input[type=checkbox]{min-height:0;width:18px;height:18px}
+  input[type=number]{width:100%;max-width:140px}
+  .btn{min-height:38px;padding:7px 12px}
+  .row{gap:10px}
+  .row label{flex:1 1 140px}
+  .row label select,.row label input:not([type=checkbox]){width:100%}
+  .pager .btn{min-width:38px;padding:6px 9px}
+  td.small{max-width:none}
+  /* bảng -> thẻ (JS gán class "cards" và nhãn cột data-label) */
+  table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:100%}
+  table.cards tr.thr{display:none}
+  table.cards tr{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:8px 0;background:#fff}
+  table.cards tr.click:active{background:#f0f5ff}
+  table.cards td{border:0;padding:4px 0;display:flex;justify-content:flex-start;align-items:flex-start;gap:6px;text-align:right;overflow-wrap:anywhere}
+  table.cards td.emp{display:none}
+  table.cards td::before{content:attr(data-label);color:var(--muted);font-size:12px;text-align:left;flex:none;max-width:45%;padding-top:2px;margin-right:auto}
+  table.cards td[data-label=""]::before{content:none}
+  table.cards td.n{text-align:right}
+  .vwcards{grid-template-columns:repeat(2,1fr)}
+  .vwcard strong{font-size:16px}
+  canvas.vwc{height:220px}
+  .vwkv{max-height:none}
+  .vwruns{max-height:50vh}
+  .vwtw{max-height:60vh}
+  .logincard{width:min(340px,92vw);padding:20px}
+  .vwbar{font-size:12px;gap:8px}
+}

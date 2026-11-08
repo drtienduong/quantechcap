@@ -16,3 +16,4 @@ header .brand{font-weight:700;font-size:16px;color:#fff}header .sp{flex:1}
 .doc pre code{background:none;padding:0;color:inherit}
 .doc ul,.doc ol{padding-left:24px}
 @media (max-width:860px){.wrap{display:block}.toc{position:static;max-height:none;margin-bottom:14px}.doc{padding:6px 16px 20px}}
+@media (max-width:640px){header{flex-wrap:wrap;gap:4px 8px;padding:8px 10px}header .sp{display:none}header a{font-size:13px;padding:4px 6px}.doc pre{font-size:12px}}

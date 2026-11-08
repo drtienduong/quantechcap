@@ -73,6 +73,9 @@ function QC_APP() {
     nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"], ["#/ispass", "Alpha pass IS"], ["#/os1", "Lịch sử OS1"]].map(([href, label]) =>
       h("a", { href, class: (cur === href || cur.startsWith(href + "/") || (href === "#/jobs" && cur.startsWith("#/job/"))) ? "active" : "" }, label)),
       h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Hướng dẫn AI"));
+    // điện thoại: menu cuộn ngang -> kéo mục đang mở vào giữa tầm nhìn
+    const act = nav.querySelector("a.active");
+    if (act && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = Math.max(0, act.offsetLeft - (nav.clientWidth - act.offsetWidth) / 2);
   }
   async function route() {
     clearTimers();
@@ -546,7 +549,13 @@ const METRIC_NAMES = ["net_profit", "custom_sharpe", "fitness", "profit_factor",
   "os_trades", "os_winrate", "os_profit_factor", "os_gross_profit", "os_gross_loss", "os_days", "os_note"];
 
 function drawEquity(canvas, pts) {
-  const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height, pad = 38;
+  // vẽ theo kích thước hiển thị thật x độ nét màn hình (điện thoại, Z Fold gập/mở)
+  canvas._pts = pts;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || 900, H = canvas.clientHeight || 300, pad = W < 480 ? 30 : 38;
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) { canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "#fbfcfd"; ctx.fillRect(0, 0, W, H);
   ctx.font = "12px Segoe UI";
@@ -563,7 +572,7 @@ function drawEquity(canvas, pts) {
   ctx.stroke();
   ctx.fillStyle = "#68717d";
   ctx.fillText(`max ${vfmt(hi, 2)}`, pad, 18); ctx.fillText(`min ${vfmt(lo, 2)}`, pad, H - 10);
-  ctx.fillText(String(pts[0][0]), W - pad - 170, H - 10); ctx.textAlign = "right"; ctx.fillText(String(pts[pts.length - 1][0]), W - pad, H - 10); ctx.textAlign = "left";
+  ctx.fillText(String(pts[0][0]), Math.max(pad + 90, W - pad - 170), H - 10); ctx.textAlign = "right"; ctx.fillText(String(pts[pts.length - 1][0]), W - pad, H - 10); ctx.textAlign = "left";
 }
 
 function buildViewer(id, job) {
@@ -684,3 +693,31 @@ function buildViewer(id, job) {
 if (location.hash === "#/guide_ai") location.replace("/guide_ai");   // trang hướng dẫn công khai, không cần đăng nhập
 else if (document.getElementById("f")) QC_LOGIN();
 else if (document.getElementById("app")) QC_APP();
+
+/* ---------- điện thoại: bảng -> thẻ (gắn nhãn cột cho từng ô), vẽ lại biểu đồ khi đổi kích thước ---------- */
+function labelTables(root) {
+  root.querySelectorAll("table:not(.vwt):not(.cards)").forEach((t) => {
+    const rows = [...t.querySelectorAll("tr")];
+    const hr = rows.find((r) => r.querySelector("th"));
+    if (!hr) return;
+    const labels = [...hr.children].map((c) => c.textContent.trim());
+    hr.classList.add("thr");
+    rows.forEach((r) => { if (r !== hr) [...r.children].forEach((td, i) => {
+      if (td.tagName !== "TD") return;
+      td.dataset.label = labels[i] || "";
+      if (!td.children.length && !td.textContent.trim()) td.classList.add("emp");   // điện thoại: ẩn ô trống
+    }); });
+    t.classList.add("cards");
+  });
+}
+let _lblPending = false;
+new MutationObserver(() => {
+  if (_lblPending) return;
+  _lblPending = true;
+  requestAnimationFrame(() => { _lblPending = false; labelTables(document); });
+}).observe(document.documentElement, { childList: true, subtree: true });
+let _rsz = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_rsz);
+  _rsz = setTimeout(() => document.querySelectorAll("canvas.vwc").forEach((c) => { if (c._pts) drawEquity(c, c._pts); }), 150);
+});
