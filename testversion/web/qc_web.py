@@ -127,6 +127,10 @@ def init_db():
     if "src_job_id" not in jcols:   # job OS1: biến thể nguồn (job IS + run)
         con.execute("alter table jobs add column src_job_id integer")
         con.execute("alter table jobs add column src_run_id integer")
+    if "ext_key" not in jcols:      # report offline (chạy ngoài web) nhập từ desk
+        con.execute("alter table jobs add column ext_key text")
+        con.execute("alter table jobs add column source text")
+    con.execute("create unique index if not exists ux_jobs_ext on jobs(ext_key) where ext_key is not null")
     # mỗi biến thể chỉ chạy OS1 một lần (job lỗi/hủy trước khi có kết quả thì được nộp lại)
     con.execute("create unique index if not exists ux_os1_src on jobs(src_job_id, src_run_id) "
                 "where type='os1' and status not in ('failed','cancelled')")
@@ -486,10 +490,17 @@ class Handler(BaseHTTPRequestHandler):
                 off = max(0, int(q.get("offset", ["0"])[0]))
                 lim = min(100, max(1, int(q.get("limit", ["30"])[0])))
                 kind = "type='os1'" if q.get("kind", [""])[0] == "os1" else "type!='os1'"
-                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json,src_job_id,src_run_id "
-                                   f"from jobs where user_id=? and {kind} order by id desc limit ? offset ?", (uid, lim, off)).fetchall()
+                src = q.get("src", [""])[0]
+                if src == "web":
+                    kind += " and type!='offline'"
+                elif src == "offline":
+                    kind += " and type='offline'"
+                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json,src_job_id,src_run_id,source "
+                                   f"from jobs where user_id=? and {kind} order by created desc, id desc limit ? offset ?",
+                                   (uid, lim, off)).fetchall()
                 total = con.execute(f"select count(*) from jobs where user_id=? and {kind}", (uid,)).fetchone()[0]
-                return self.send_json({"ok": True, "total": total,
+                n_off = con.execute("select count(*) from jobs where user_id=? and type='offline'", (uid,)).fetchone()[0]
+                return self.send_json({"ok": True, "total": total, "offline_total": n_off,
                                        "jobs": [dict(self.job_row(r), notice=job_notice(con, r)) for r in rows]})
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
@@ -735,6 +746,8 @@ class Handler(BaseHTTPRequestHandler):
                                     (u["id"], a["name"], json.dumps(a["params"]), json.dumps(meta), now_iso()))
                 con.commit()
                 return self.send_json({"ok": True, "count": len(items)})
+            if parts == ["import"] and method == "POST":
+                return self.desk_import(con, self.read_json())
             if len(parts) == 3 and parts[0] == "jobs" and parts[1].isdigit():
                 return self.desk_job(con, int(parts[1]), parts[2], self.read_json())
             if len(parts) == 3 and parts[0] == "submissions" and parts[1].isdigit() and parts[2] == "update":
@@ -803,6 +816,43 @@ class Handler(BaseHTTPRequestHandler):
             if item or time.time() >= end:
                 return self.send_json({"ok": True, "item": item})
             time.sleep(0.5)
+
+    def desk_import(self, con, body):
+        """Desk đăng ký một report offline (Dương/agent chạy ngoài web) cho một tài khoản. Web kiểm lại:
+        không bao giờ nhận OS2 (todate > os1_end hoặc thiếu todate); tài khoản loại 1 không nhận report vượt is_end."""
+        if not isinstance(body, dict):
+            return self.fail(400, "JSON không hợp lệ")
+        u = con.execute("select id, os1_access from users where slug=?", (str(body.get("slug", "")),)).fetchone()
+        if not u:
+            return self.fail(404, "slug không tồn tại")
+        key, cfg = body.get("ext_key"), body.get("config")
+        if not isinstance(key, str) or not key or len(key) > 400 or not isinstance(cfg, dict):
+            return self.fail(400, "thiếu ext_key/config")
+        td = str(cfg.get("todate", ""))
+        limit = LIMITS["os1_end"] if u["os1_access"] else LIMITS["is_end"]
+        if not C.DATE_RE.match(td) or td == "0" or td > limit:
+            return self.send_json({"ok": False, "error": f"todate {td or '(trống)'} vượt {limit} hoặc không hợp lệ"}, 400)
+        cfg["type"] = "offline"
+        alpha = str(body.get("alpha", ""))[:120]
+        source = str(body.get("source", "offline"))[:60]
+        created = str(body.get("created") or now_iso())[:19]
+        j = con.execute("select id, user_id from jobs where ext_key=?", (key,)).fetchone()
+        if j and j["user_id"] != u["id"]:
+            return self.fail(409, "ext_key thuộc tài khoản khác")
+        if j:
+            con.execute("update jobs set alpha=?, config_json=?, created=?, source=?, status='done', progress=100, "
+                        "message='Report offline', last_update=? where id=?",
+                        (alpha, json.dumps(cfg), created, source, time.time(), j["id"]))
+            con.execute("delete from variants where job_id=?", (j["id"],))
+            jid = j["id"]
+        else:
+            cur = con.execute("insert into jobs(user_id,type,alpha,config_json,status,progress,message,created,started,last_update,"
+                              "ext_key,source) values(?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (u["id"], "offline", alpha, json.dumps(cfg), "done", 100, "Report offline", created, created,
+                               time.time(), key, source))
+            jid = cur.lastrowid
+        con.commit()
+        return self.send_json({"ok": True, "job_id": jid})
 
     def desk_job(self, con, jid, action, body):
         j = con.execute("select * from jobs where id=?", (jid,)).fetchone()

@@ -50,7 +50,12 @@ SMOKE_TIMEOUT_MIN = float(CFG.get("smoke_timeout_min", 20))
 STATE = Path(CFG.get("state_dir") or HERE / "state")
 STATE.mkdir(exist_ok=True)
 JOBS_FILE = STATE / "jobs.json"
-OS1_FILE = STATE / "os1_jobs.json"     # job OS1 đang/đã chạy: nguồn IS, tham số, cờ crypto
+OS1_FILE = STATE / "os1_jobs.json"
+IMPORTS_FILE = STATE / "imports.json"   # report offline đã nhập: ext_key -> {jid, sig}
+# Report offline (chạy ngoài web: Dương, agent) đưa lên web cho một tài khoản. CHỈ Dương cấu hình trong desk_config.
+IMPORTS = [{"root": Path(x["root"]).resolve(), "slug": x["slug"], "source": x.get("source") or Path(x["root"]).name}
+           for x in CFG.get("imports", [])]
+IMPORT_EVERY_SEC = int(CFG.get("import_every_sec", 600))     # job OS1 đang/đã chạy: nguồn IS, tham số, cờ crypto
 OS1_LEDGER = Path(CFG.get("os1_ledger") or r"D:\quantechcap-data-research\os1_ledger.csv")
 
 heavy_busy = threading.Event()   # đang chạy optimize (hàng nặng)
@@ -138,6 +143,142 @@ def catalog_loop():
         time.sleep(60)
 
 
+# ---------- nhập report offline lên web ----------
+def imports_index():
+    try:
+        return json.loads(IMPORTS_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def ini_config(ini_text, n_variants):
+    """Cấu hình hiển thị (giống job web) dựng từ input-optimize.ini của report."""
+    tester, inputs, sec = {}, {}, ""
+    for line in ini_text.lstrip("﻿").splitlines():
+        st = line.strip()
+        if st.startswith("["):
+            sec = st.lower()
+            continue
+        k, eq, v = line.partition("=")
+        if not eq:
+            continue
+        k, v = k.strip(), v.split(";")[0].strip()
+        if sec == "[tester]":
+            tester[k.lower()] = v
+        elif sec == "[testerinputs]":
+            parts = [x.strip() for x in v.split(",")]
+            try:
+                a = float(parts[0]); st_ = float(parts[1]) if len(parts) > 1 else 0.0; b = float(parts[2]) if len(parts) > 2 else a
+                inputs[k] = [a, st_, b]
+            except (ValueError, IndexError):
+                pass
+    def nd(v):   # ngày dạng yyyy.mm.dd như job web
+        d = (v or "").replace(".", "").replace("-", "").replace("/", "")
+        return f"{d[:4]}.{d[4:6]}.{d[6:]}" if len(d) == 8 and d.isdigit() else (v or "")
+    tester["fromdate"], tester["todate"] = nd(tester.get("fromdate")), nd(tester.get("todate"))
+    sym = tester.get("symbols", "")
+    port = sym.lower().startswith("portfolio:")
+    syms = [x.strip().upper() for x in (sym[10:] if port else sym).split(",") if x.strip()]
+    return {"type": "offline", "symbols_mode": "portfolio" if port else "independent", "symbols": syms,
+            "period": tester.get("period", ""), "fromdate": tester.get("fromdate", ""), "todate": tester.get("todate", ""),
+            "deposit": tester.get("deposit", ""), "leverage": tester.get("leverage", ""), "swap_mode": tester.get("swap_mode", ""),
+            "lot": tester.get("lot", ""), "variants": n_variants, "params": inputs}
+
+
+def report_dates_ok(db):
+    """OS2 không bao giờ lên web: mọi run phải có todate và todate <= os1_end (2026.01.01)."""
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        tds = [(r[0] or "").replace(".", "").replace("-", "") for r in con.execute("select distinct todate from input")]
+    finally:
+        con.close()
+    lim = LIMITS["os1_end"].replace(".", "")
+    return bool(tds) and all(len(x) == 8 and x.isdigit() and x != "00000000" and x <= lim for x in tds)
+
+
+def import_one(imp, run_dir, key, sig, idx):
+    db = run_dir / "data" / "results.sqlite"
+    ini_text = (run_dir / "input-optimize.ini").read_text(encoding="utf-8", errors="replace")
+    variants = collect_variants(run_dir)
+    if not variants:
+        return
+    cfg = ini_config(ini_text, len(variants))
+    alpha = ini_value(ini_text, "alpha_name") or run_dir.parent.name
+    created = datetime.fromtimestamp(db.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    rel = str(run_dir.relative_to(imp["root"])) if imp["root"] in run_dir.parents else run_dir.name
+    summary = {"variants": len(variants), "is_pass": sum(1 for v in variants if v["is_pass"]), "minutes": None,
+               "report": rel, "engine": engine_of(run_dir), "source": imp["source"]}
+    try:
+        r = api("POST", "/api/desk/import", {"slug": imp["slug"], "ext_key": key, "source": imp["source"], "alpha": alpha[:120],
+                                             "config": cfg, "created": created}, timeout=60)
+    except urllib.error.HTTPError as e:      # web từ chối (vd OS1 cho tài khoản loại 1): ghi lý do, không thử lại tới khi report đổi
+        try:
+            r = json.loads(e.read() or b"{}")
+        except Exception:  # noqa: BLE001
+            r = {}
+        r = {"ok": False, "error": r.get("error") or f"HTTP {e.code}"}
+    if not r.get("ok"):
+        log(f"nhập {key} bị web từ chối: {r.get('error')}")
+        idx[key] = {"jid": None, "sig": sig, "rejected": r.get("error")}
+        return
+    jid = r["job_id"]
+    for i in range(0, len(variants), 400):
+        api("POST", f"/api/desk/jobs/{jid}/result", {"variants": variants[i:i + 400], "final": i + 400 >= len(variants),
+                                                     "summary": summary}, timeout=120)
+    jobs_save(jid, imp["slug"], run_dir, kind="offline")
+    idx[key] = {"jid": jid, "sig": sig}
+
+
+def scan_imports():
+    """Quét các gốc report offline; report mới hoặc đã đổi (mtime/size results.sqlite) thì gửi lên web.
+    Bỏ qua report đang ghi (sửa < 2 phút), report có OS2 hoặc không ghi todate. Mã alpha KHÔNG gửi lên web."""
+    idx = imports_index()
+    n_new = n_skip = 0
+    for imp in IMPORTS:
+        if imp["slug"] not in TRADERS or not imp["root"].is_dir():
+            continue
+        seen = set()
+        for dirpath, dirnames, filenames in os.walk(imp["root"]):
+            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))
+                           and not getattr(os.path, "isjunction", lambda x: False)(os.path.join(dirpath, d))]
+            if "results.sqlite" not in filenames or Path(dirpath).name != "data":
+                continue
+            db = Path(dirpath) / "results.sqlite"
+            run_dir = db.parent.parent.resolve()
+            if run_dir in seen or not (run_dir / "input-optimize.ini").is_file():
+                continue
+            seen.add(run_dir)
+            try:
+                stt = db.stat()
+                if time.time() - stt.st_mtime < 120:
+                    continue
+                key = imp["source"] + ":" + (str(run_dir.relative_to(imp["root"])) if imp["root"] in run_dir.parents else run_dir.name)
+                sig = f"{int(stt.st_mtime)}:{stt.st_size}"
+                if idx.get(key, {}).get("sig") == sig:
+                    continue
+                if not report_dates_ok(db):
+                    idx[key] = {"jid": None, "sig": sig, "skipped": "OS2 hoặc thiếu todate"}
+                    n_skip += 1
+                    continue
+                import_one(imp, run_dir, key, sig, idx)
+                n_new += 1
+            except Exception as e:  # noqa: BLE001
+                log(f"nhập report {dirpath} lỗi: {e!r}")
+            IMPORTS_FILE.write_text(json.dumps(idx, indent=1, ensure_ascii=False), encoding="utf-8")
+    if n_new or n_skip:
+        log(f"nhập report offline: {n_new} mới/đổi, {n_skip} bỏ qua (OS2/thiếu todate)")
+
+
+def import_loop():
+    time.sleep(30)
+    while True:
+        try:
+            scan_imports()
+        except Exception as e:  # noqa: BLE001
+            log("quét report offline lỗi:", repr(e))
+        time.sleep(IMPORT_EVERY_SEC)
+
+
 # ---------- chỉ mục job ----------
 def jobs_index():
     try:
@@ -223,7 +364,7 @@ def prepare_os1(jid, slug, t, cfg):
     symbol, params = row[0], json.loads(row[1] or "{}")
     if (row[2] or "").replace(".", "") > C.OS1_IS_END:
         raise JobError("Job gốc đã chạy qua 2024-01-01, kết quả OS1 đã có trong chính job đó.")
-    src_ini = (run_dir / "input-optimize.ini").read_text(encoding="utf-8", errors="replace")
+    src_ini = (run_dir / "input-optimize.ini").read_text(encoding="utf-8", errors="replace").lstrip("﻿")
     alpha = ini_value(src_ini, "alpha_name")
     if not C.NAME_RE.match(alpha) or not alpha.endswith("_" + t["name"]) or not (run_dir / "alpha.rs").is_file():
         raise JobError("Report IS gốc thiếu thông tin alpha.")
@@ -325,7 +466,7 @@ def finish_os1(jid, slug, t, st, t0, info):
                "is_pass": bool(e.get("os_pass")), "recent_sharpe": None, "stopped_out": e.get("stopped_out"),
                "rejected_orders": e.get("rejected_orders")}
     summary = {"variants": 1, "is_pass": int(bool(e.get("os_pass"))), "minutes": round((time.time() - t0) / 60, 1),
-               "report": str(run_dir.relative_to(t["dir"])),
+               "report": str(run_dir.relative_to(t["dir"])), "engine": engine_of(run_dir),
                "os1": dict(e, src_job_id=info.get("src_job_id"), src_run_id=info.get("src_run_id"))}
     api("POST", f"/api/desk/jobs/{jid}/result", {"variants": [variant], "final": True, "summary": summary}, timeout=120)
     os1_ledger("done", jid, slug, info, {k: e.get(k) for k in ("os_pass", "os_sharpe", "is_sharpe", "os_profit",
@@ -371,6 +512,21 @@ def read_progress(run_id):
     txt = pf.read_text(encoding="utf-8", errors="replace").strip()
     m = re.match(r"([\d.]+)%", txt)
     return (float(m.group(1)) if m else None), txt
+
+
+def engine_of(run_dir: Path):
+    """Phiên bản engine đã tạo report (bảng engine_info; report cũ không có)."""
+    try:
+        con = sqlite3.connect(f"file:{run_dir / 'data' / 'results.sqlite'}?mode=ro", uri=True)
+        try:
+            if not con.execute("select count(*) from sqlite_master where type='table' and name='engine_info'").fetchone()[0]:
+                return None
+            r = con.execute("select version, sha, git_commit from engine_info limit 1").fetchone()
+            return {"version": r[0], "sha": r[1], "commit": r[2]} if r else None
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def collect_variants(run_dir: Path):
@@ -608,7 +764,7 @@ def finish_job(jid, slug, t, st, t0):
     jobs_save(jid, slug, run_dir)
     n_pass = sum(1 for v in variants if v["is_pass"])
     summary = {"variants": len(variants), "is_pass": n_pass, "minutes": round((time.time() - t0) / 60, 1),
-               "report": str(run_dir.relative_to(t["dir"]))}
+               "report": str(run_dir.relative_to(t["dir"])), "engine": engine_of(run_dir)}
     for i in range(0, len(variants), 400):
         last_batch = i + 400 >= len(variants)
         api("POST", f"/api/desk/jobs/{jid}/result", {"variants": variants[i:i + 400], "final": last_batch, "summary": summary}, timeout=120)
@@ -766,7 +922,8 @@ def handle_request(req):
         if not entry or not t or entry["slug"] != slug:
             raise ValueError("không có kết quả của job này trên data-server")
         run_dir = Path(entry["run_dir"]).resolve()
-        if t["dir"] not in run_dir.parents:
+        roots = [t["dir"]] + ([x["root"] for x in IMPORTS if x["slug"] == slug] if entry.get("kind") == "offline" else [])
+        if not any(r == run_dir or r in run_dir.parents for r in roots):
             raise ValueError("đường dẫn không hợp lệ")
         db = run_dir / "data" / "results.sqlite"
         os1 = entry.get("kind") == "os1"
@@ -850,6 +1007,8 @@ def handle_request(req):
 def main():
     log(f"desk chạy; web={WEB}; trader={list(TRADERS)}; data={DATA_FOLDER}")
     threading.Thread(target=catalog_loop, daemon=True).start()
+    if IMPORTS:
+        threading.Thread(target=import_loop, daemon=True).start()
     recover_jobs()
     backoff = 3
     while True:

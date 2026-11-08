@@ -328,27 +328,36 @@ async function pageJobs(main, page) {
       h("button", { class: "btn", disabled: page >= pages, on: { click: () => go(page + 1) } }, "Cũ hơn ›"),
       h("span", { class: "muted" }, `Trang ${page}/${pages} · ${total} job`));
   }
+  const srcSel = sessionStorage.getItem("qc_jobsrc") || "";
+  const srcBar = h("div", { class: "pager" });
   async function load() {
-    const r = await api(`/api/jobs?limit=${JOBS_PER_PAGE}&offset=${(page - 1) * JOBS_PER_PAGE}`);
+    const r = await api(`/api/jobs?limit=${JOBS_PER_PAGE}&offset=${(page - 1) * JOBS_PER_PAGE}` + (srcSel ? "&src=" + srcSel : ""));
+    srcBar.replaceChildren(...(r.offline_total ? [["", "Tất cả"], ["web", "Chạy trên web"], ["offline", `Report offline (${r.offline_total})`]].map(([v, l]) =>
+      h("button", { class: "btn" + (v === srcSel ? " primary" : ""), on: { click: () => { sessionStorage.setItem("qc_jobsrc", v); if (location.hash !== "#/jobs") location.hash = "#/jobs"; else window.dispatchEvent(new HashChangeEvent("hashchange")); } } }, l)) : []));
     const pages = Math.max(1, Math.ceil((r.total || 0) / JOBS_PER_PAGE));
     if (page > pages) { go(pages); return; }
     active = r.jobs.some((j) => ["queued", "dispatched", "running"].includes(j.status));
     const key = JSON.stringify(r);
     if (key === last) return;           // không đổi thì không vẽ lại (tránh nháy, giữ thao tác của người dùng)
     last = key;
-    box.replaceChildren(...(r.jobs.length ? [pagerEl(pages, r.total), h("table", {},
-      h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
+    box.replaceChildren(...(r.jobs.length ? [srcBar, pagerEl(pages, r.total), h("table", {},
+      h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
       r.jobs.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
-        h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", {}, tag(j.status)),
+        h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"), h("td", {}, tag(j.status)),
         h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")),
         h("td", { class: j.status === "failed" ? "err small" : (j.notice ? "warn small" : "muted small") }, j.notice || (j.status === "done" ? "" : j.message || "")),
         h("td", { class: "muted" }, j.created)))),
       pages > 1 ? pagerEl(pages, r.total) : null].filter(Boolean)
-      : [h("p", { class: "muted" }, "Chưa có job.")]));
+      : [srcBar, h("p", { class: "muted" }, "Chưa có job.")]));
   }
   await load();
   let tick = 0;   // có job đang chạy trên trang: cập nhật 3 giây/lần; không thì 15 giây/lần
   timers.push(setInterval(() => { tick++; if (active || tick % 5 === 0) load().catch(() => {}); }, 3000));
+}
+
+function engineText(e) {
+  if (!e) return "engine cũ (chưa ghi phiên bản)";
+  return `engine ${e.version}` + (e.commit && e.commit.includes("dirty") ? " (đang sửa)" : "") + (e.sha ? ` · ${String(e.sha).slice(0, 8)}` : "");
 }
 
 /* ---------- OS1 ---------- */
@@ -518,7 +527,11 @@ async function pageJob(main, id) {
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,
       job.summary && c.type !== "os1" ? h("p", {}, `Kết quả: ${job.summary.variants} biến thể, ${job.summary.is_pass} pass IS, ${job.summary.minutes} phút. Thư mục báo cáo trên data-server: ${job.summary.report || ""}`) : null);
     const ver = job.summary && job.summary.report ? String(job.summary.report).split(/[\/]/).pop() : "";
-    const slim = job.status === "done" && job.summary ? h("div", { class: "vwbar" }, h("span", { class: "mono" }, job.alpha), h("span", { class: "mono" }, ver), h("span", {}, `${job.summary.variants} run`)) : null;
+    const eng = job.summary ? engineText(job.summary.engine) : "";
+    const slim = job.status === "done" && job.summary ? h("div", { class: "vwbar" }, h("span", { class: "mono" }, job.alpha),
+      c.type === "offline" ? h("span", { class: "tag" }, "offline · " + (job.source || job.summary.source || "")) : null,
+      h("span", { class: "mono" }, ver), h("span", { class: "muted", title: (job.summary.engine && job.summary.engine.commit) || "" }, eng),
+      h("span", {}, `${job.summary.variants} run`)) : null;
     if (job.status === "done" && !viewer) viewer = buildViewer(id, job);
     main.classList.toggle("wide", job.status === "done");
     const doneNote = job.status === "done" && job.notice ? h("div", { class: "banner warnbox" }, job.notice) : null;
