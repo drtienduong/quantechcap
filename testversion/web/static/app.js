@@ -219,8 +219,27 @@ async function pageRun(main, name) {
   const symGroups = ST.groups.map((g) => h("div", { class: "symgroup" }, h("b", {}, g + ": "),
     ST.symbols.filter((x) => x.group === g).map((x) => h("label", { class: "sym", title: `từ ${x.start} · point value ${x.point_value}/lot${x.swap ? " · có swap" : ""}` },
       boxOf[x.symbol], x.symbol))));
-  const setSyms = (list) => boxes.forEach((b) => { b.checked = list.includes(b.value); });
-  const addSyms = (list) => boxes.forEach((b) => { if (list.includes(b.value)) b.checked = true; });
+  // Ngày bắt đầu: gõ 0 hoặc ngày sớm hơn dữ liệu -> tự nhảy về ngày bắt đầu SỚM NHẤT của các symbol đang chọn
+  const dkey = (v) => String(v || "").replace(/\D/g, "");
+  const fromHint = h("div", { class: "muted small" });
+  function earliestStart() {
+    const sel = boxes.filter((b) => b.checked).map((b) => SYM[b.value].start);
+    return sel.length ? sel.reduce((m, x) => (dkey(x) < dkey(m) ? x : m)) : null;
+  }
+  function fixFrom() {
+    const e = earliestStart();
+    if (!e) return;
+    const v = f.from.value.trim(), k = dkey(v);
+    if (v === "0" || (k.length === 8 && k < dkey(e))) {
+      f.from.value = e;
+      fromHint.textContent = "Tự đặt = ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn";
+    } else if (k.length === 8) fromHint.textContent = "";
+  }
+  f.from.addEventListener("input", () => { if (f.from.value.trim() === "0") fixFrom(); });
+  f.from.addEventListener("change", fixFrom);
+  boxes.forEach((b) => b.addEventListener("change", fixFrom));
+  const setSyms = (list) => { boxes.forEach((b) => { b.checked = list.includes(b.value); }); fixFrom(); };
+  const addSyms = (list) => { boxes.forEach((b) => { if (list.includes(b.value)) b.checked = true; }); fixFrom(); };
   const groupSyms = (g) => ST.symbols.filter((x) => x.group === g).map((x) => x.symbol);
   const pRows = Object.entries(a.params).map(([k, v]) => ({
     k, a: h("input", { type: "number", value: v[0], step: "any" }), s: h("input", { type: "number", value: v[1], step: "any" }), b: h("input", { type: "number", value: v[2], step: "any" }),
@@ -283,7 +302,7 @@ async function pageRun(main, name) {
     h("h2", {}, "Chạy: ", h("span", { class: "mono" }, name)),
     h("div", { class: "card" }, h("div", { class: "row" },
       h("label", {}, "Loại job", h("br"), f.type), h("label", {}, "Khung thời gian" + (reqP ? ` (alpha yêu cầu ${reqP})` : ""), h("br"), f.period),
-      h("label", {}, "Từ ngày", h("br"), f.from), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to), ticksWrap),
+      h("label", { title: "Gõ 0 để lấy ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn" }, "Ngày bắt đầu (0 = sớm nhất)", h("br"), f.from, fromHint), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to), ticksWrap),
       periodWarn,
       h("p", { class: "muted" }, ST.os1_access ? "Tài khoản của bạn được chạy đến " + isEnd + " (IS + OS1). OS2 không chạy qua web. "
         : "Tài khoản của bạn chạy IS đến " + isEnd + ". Biến thể pass IS được nộp chạy OS1 ở trang Alpha pass IS. ", "Smoke: tối đa ",
