@@ -129,14 +129,19 @@ async function pageSubmit(main) {
     if (!f) return;
     if (f.size > 200000) { info.append(h("p", { class: "err" }, "File quá lớn (tối đa 200 KB).")); srcText = null; return; }
     srcText = await f.text();
-    if (!nameIn.value) nameIn.value = f.name.replace(/\.rs$/i, "");
+    // Tên alpha: ưu tiên tên trong fn name() của file; không có thì lấy tên file, bỏ hậu tố trình duyệt thêm khi tải trùng
+    // (vd "x (1).rs", "x-1.rs") và đổi ký tự không hợp lệ thành "_". Luôn cập nhật khi chọn file mới.
+    const m = srcText.match(/fn\s+name\s*\(\s*&self\s*\)\s*->\s*&'static\s+str\s*\{\s*"([A-Za-z0-9_]{1,80})"/);
+    nameIn.value = m && m[1].endsWith(suffix) ? m[1]
+      : f.name.replace(/\.rs$/i, "").replace(/\s*\(\d+\)$/, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
     info.append(h("p", { class: "muted" }, `${f.name}: ${f.size} byte, ${srcText.split("\n").length} dòng`));
   });
   const btn = h("button", { class: "btn primary", on: { click: async () => {
     info.replaceChildren();
     if (!srcText) { info.append(h("p", { class: "err" }, "Chọn file .rs trước.")); return; }
     const name = nameIn.value.trim();
-    if (!name.endsWith(suffix)) { info.append(h("p", { class: "err" }, `Tên phải kết thúc bằng ${suffix}`)); return; }
+    if (!/^[A-Za-z0-9_]{1,80}$/.test(name) || !name.endsWith(suffix)) {
+      info.append(h("p", { class: "err" }, `Tên "${name}" không hợp lệ: chỉ chữ, số, dấu _ (tối đa 80 ký tự) và phải kết thúc bằng ${suffix}. Sửa ô "Tên alpha" rồi nộp lại.`)); return; }
     btn.disabled = true;
     const j = await api("/api/submissions", { name, source: srcText });
     btn.disabled = false;
