@@ -61,6 +61,12 @@ OS1_LEDGER = Path(CFG.get("os1_ledger") or r"D:\quantechcap-data-research\os1_le
 heavy_busy = threading.Event()   # đang chạy optimize (hàng nặng)
 smoke_busy = threading.Event()   # đang chạy smoke (hàng nhanh, chạy song song với hàng nặng)
 sub_busy = threading.Event()     # đang kiểm tra một bản nộp alpha
+q_busy = threading.Event()       # trợ lý AI đang trả lời một câu hỏi
+# Trợ lý AI cho trader: agent quantechcap_support_claude chạy `claude -p` KHÔNG công cụ, chỉ đọc ngữ cảnh desk đưa vào.
+SUPPORT = dict({"agent_dir": r"C:\Claude\agents\quantechcap_support_claude",
+                "claude": str(Path.home() / ".local" / "bin" / "claude.exe"), "timeout_sec": 240}, **CFG.get("support", {}))
+SUPPORT_ON = Path(SUPPORT["agent_dir"], "SYSTEM_PROMPT.md").is_file()
+KIT = HERE.parent / "web" / "static" / "kit"
 _jobs_lock = threading.Lock()
 _catalog = {}   # slug -> {alpha_name: params}
 _cat_hash = {}
@@ -141,6 +147,112 @@ def catalog_loop():
             log("catalog lỗi:", repr(e))
         n += 1
         time.sleep(60)
+
+
+# ---------- trợ lý AI ----------
+def alpha_facts(src):
+    """Sự kiện rút từ mã alpha (KHÔNG gửi mã): các hàm được viết, khai báo khung, lọc khung nến, số lệnh Open."""
+    import re as _re
+    f = {"overrides": [n for n in ("on_bar", "on_tick", "on_bar_with_account", "on_tick_with_account", "wants_account")
+                       if _re.search(r"fn\s+" + n + r"\s*\(", src)]}
+    m = _re.search(r'const\s+REQUIRED_PERIOD\s*:\s*&str\s*=\s*"(\w+)"', src)
+    f["required_period"] = m.group(1) if m else None
+    f["period_minutes_checks"] = sorted(set(_re.findall(r"period_minutes\s*[!=<>]=?\s*(\d+)", src)))
+    f["wants_account_true"] = bool(_re.search(r"fn\s+wants_account\s*\([^)]*\)\s*->\s*bool\s*\{\s*true", src))
+    f["open_signals_in_code"] = len(_re.findall(r"Signal::Open", src))
+    f["custom_account_rules"] = [n for n in ("account_leverage", "margin_call_level", "stopout_level") if _re.search(r"fn\s+" + n, src)]
+    return f
+
+
+def job_diagnostics(slug, t, job):
+    """Chẩn đoán phía data-server cho một job của trader (chỉ thư mục của trader / gốc nhập của trader)."""
+    d = {}
+    cfg = job.get("config") or {}
+    fd = (cfg.get("fromdate") or "").replace(".", "")
+    starts = {s_: C.SYMBOLS[s_][2] for s_ in cfg.get("symbols") or [] if s_ in C.SYMBOLS}
+    d["symbols_data_start"] = starts
+    d["symbols_starting_after_fromdate"] = [s_ for s_, st in starts.items() if st.replace(".", "") > fd] if fd else []
+    entry = jobs_index().get(str(job.get("id")))
+    if not entry or entry.get("slug") != slug:
+        d["report"] = "chưa có kết quả trên data-server (job chưa chạy xong hoặc lỗi trước khi chạy)"
+        return d
+    run_dir = Path(entry["run_dir"]).resolve()
+    roots = [t["dir"]] + [x["root"] for x in IMPORTS if x["slug"] == slug]
+    if not any(r == run_dir or r in run_dir.parents for r in roots):
+        return d
+    src = run_dir / "alpha.rs"
+    if src.is_file():
+        d["alpha_facts"] = alpha_facts(src.read_text(encoding="utf-8", errors="replace"))
+        rp = d["alpha_facts"]["required_period"]
+        if rp and cfg.get("period") and rp != cfg.get("period"):
+            d["period_mismatch"] = f"alpha khai báo REQUIRED_PERIOD {rp} nhưng job chạy {cfg.get('period')}"
+        ov = d["alpha_facts"]["overrides"]
+        if cfg.get("symbols_mode") == "independent" and not ({"on_bar", "on_tick"} & set(ov)) and not d["alpha_facts"]["wants_account_true"]:
+            d["mode_problem"] = "alpha chỉ viết *_with_account mà không bật wants_account(): ở chế độ từng symbol engine không gọi các hàm này -> 0 lệnh"
+    db = run_dir / "data" / "results.sqlite"
+    if db.is_file():
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = con.execute("select i.symbol, m.trades, m.net_profit, m.bars, m.ticks from input i join metrics m using(run_id)").fetchall()
+            d["runs"] = len(rows)
+            d["runs_zero_trades"] = sum(1 for r in rows if not r[1])
+            d["bars_ticks_first_run"] = {"bars": rows[0][3], "ticks": rows[0][4]} if rows else None
+            if con.execute("select count(*) from sqlite_master where name='account_rules'").fetchone()[0]:
+                a = con.execute("select sum(rejected_orders), sum(stopped_out), max(leverage), max(stopout_level) from account_rules").fetchone()
+                d["account"] = {"rejected_orders": a[0], "stopped_out_runs": a[1], "leverage": a[2], "stopout_level": a[3]}
+        finally:
+            con.close()
+    d["engine"] = engine_of(run_dir)
+    return d
+
+
+def handle_question(item):
+    """Gom ngữ cảnh của đúng trader hỏi -> gọi agent (không công cụ) -> gửi trả lời lên web -> ghi nhật ký."""
+    qid, slug = item["id"], item["slug"]
+    t0 = time.time()
+    answer, ok, cost = "", False, None
+    try:
+        t = TRADERS.get(slug)
+        ctx = {k: v for k, v in item.items() if k not in ("id", "question")}
+        if t and item.get("kind") == "job" and item.get("job"):
+            ctx["diagnostics"] = job_diagnostics(slug, t, item["job"])
+        docs = "\n\n".join((KIT / n).read_text(encoding="utf-8", errors="replace") for n in ("HUONG_DAN.md", "AI_GUIDE.md")
+                            if (KIT / n).is_file())
+        ctx_text = _PATH_RE.sub("<đường dẫn>", json.dumps(ctx, ensure_ascii=False, default=str))
+        msg = (f"<docs>\n{docs}\n</docs>\n<context>\n{ctx_text}\n</context>\n"
+               f"<question>\n{item['question']}\n</question>")
+        env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+        r = subprocess.run([SUPPORT["claude"], "-p", "--tools", "", "--strict-mcp-config", "--setting-sources", "project",
+                            "--no-session-persistence", "--output-format", "json",
+                            "--system-prompt-file", str(Path(SUPPORT["agent_dir"], "SYSTEM_PROMPT.md"))],
+                           input=msg.encode("utf-8"), capture_output=True, cwd=SUPPORT["agent_dir"], env=env,
+                           timeout=float(SUPPORT["timeout_sec"]), creationflags=0x08000000 if os.name == "nt" else 0)
+        out = r.stdout.decode("utf-8", errors="replace")
+        res = json.loads(out[out.find("{"):]) if "{" in out else {}
+        answer = (res.get("result") or "").strip()
+        cost = res.get("total_cost_usd")
+        ok = bool(answer) and not res.get("is_error")
+        if not ok:
+            answer = "Trợ lý AI tạm thời không trả lời được câu này. Hãy hỏi lại sau ít phút; nếu lặp lại, báo quản trị."
+            log(f"câu hỏi {qid}: agent lỗi rc={r.returncode} {(r.stderr or b'').decode('utf-8', errors='replace')[-300:]!r}")
+    except subprocess.TimeoutExpired:
+        answer = "Trợ lý AI trả lời quá lâu nên đã dừng. Hãy hỏi lại ngắn gọn hơn."
+    except Exception as e:  # noqa: BLE001
+        answer = "Trợ lý AI gặp lỗi phía data-server. Hãy hỏi lại sau."
+        log(f"câu hỏi {qid} lỗi: {e!r}")
+    try:
+        api("POST", f"/api/desk/questions/{qid}/answer", {"ok": ok, "answer": answer}, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        log(f"gửi trả lời {qid} lỗi: {e!r}")
+    try:
+        with open(Path(SUPPORT["agent_dir"], "logs", "qa.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "id": qid, "trader": slug,
+                                "kind": item.get("kind"), "question": item.get("question"), "ok": ok, "answer": answer,
+                                "seconds": round(time.time() - t0, 1), "cost_usd": cost}, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    log(f"câu hỏi {qid} ({slug}) trả lời {'OK' if ok else 'lỗi'} sau {time.time() - t0:.0f}s")
+    q_busy.clear()
 
 
 # ---------- nhập report offline lên web ----------
@@ -1023,7 +1135,8 @@ def main():
             # Rảnh: giữ kết nối tối đa 25s (nhận việc tức thì). Bận: chỉ chờ 4s để vừa phục vụ yêu cầu xem trade/equity,
             # vừa nhận việc kế tiếp ngay khi xong.
             r = api("GET", f"/api/desk/poll?wait={4 if busy else 25}&accept={','.join(lanes) or 'none'}"
-                           f"&accept_sub={0 if sub_busy.is_set() else 1}", timeout=45)
+                           f"&accept_sub={0 if sub_busy.is_set() else 1}"
+                           f"&accept_q={1 if SUPPORT_ON and not q_busy.is_set() else 0}", timeout=45)
             backoff = 3
             item = r.get("item")
             if not item:
@@ -1033,6 +1146,10 @@ def main():
                 (smoke_busy if is_smoke else heavy_busy).set()
                 log(f"nhận job {item['job']['id']} ({item['job']['slug']}, {'smoke' if is_smoke else 'heavy'})")
                 threading.Thread(target=run_job, args=(item["job"],), daemon=True).start()
+            elif item["type"] == "question":
+                q_busy.set()
+                log(f"nhận câu hỏi {item['question']['id']} ({item['question']['slug']})")
+                threading.Thread(target=handle_question, args=(item["question"],), daemon=True).start()
             elif item["type"] == "submission":
                 sub_busy.set()
                 log(f"nhận bản nộp {item['submission']['id']} ({item['submission']['slug']})")

@@ -113,3 +113,10 @@ canvas.vwc{height:300px}
   .logincard{width:min(340px,92vw);padding:20px}
   .vwbar{font-size:12px;gap:8px}
 }
+
+/* ---- Hỏi AI ---- */
+textarea.askbox{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;margin:6px 0;resize:vertical}
+.qa{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:10px 0;background:#fff}
+.qa-text{margin-top:4px;white-space:pre-wrap;font-weight:600}
+.qa-a{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);white-space:pre-wrap;line-height:1.55}
+@media(max-width:640px){textarea.askbox{font-size:16px}}

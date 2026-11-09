@@ -70,7 +70,7 @@ function QC_APP() {
   }
   function setNav() {
     const cur = location.hash || "#/";
-    nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"], ["#/ispass", "Alpha pass IS"], ["#/os1", "Lịch sử OS1"]].map(([href, label]) =>
+    nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"], ["#/ispass", "Alpha pass IS"], ["#/os1", "Lịch sử OS1"], ["#/ask", "Hỏi AI"]].map(([href, label]) =>
       h("a", { href, class: (cur === href || cur.startsWith(href + "/") || (href === "#/jobs" && cur.startsWith("#/job/"))) ? "active" : "" }, label)),
       h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Hướng dẫn AI"));
     // điện thoại: menu cuộn ngang -> kéo mục đang mở vào giữa tầm nhìn
@@ -88,6 +88,7 @@ function QC_APP() {
       else if (hash.startsWith("#/job/")) await pageJob(main, parseInt(hash.slice(6), 10));
       else if (hash === "#/jobs" || hash.startsWith("#/jobs/")) await pageJobs(main, parseInt(hash.slice(7), 10) || 1);
       else if (hash === "#/submit") await pageSubmit(main);
+      else if (hash === "#/ask" || hash.startsWith("#/ask?")) await pageAsk(main, new URLSearchParams(hash.split("?")[1] || ""));
       else if (hash === "#/ispass" || hash.startsWith("#/ispass/")) await pageIsPass(main, parseInt(hash.slice(9), 10) || 1);
       else if (hash === "#/os1" || hash.startsWith("#/os1/")) await pageOs1(main, parseInt(hash.slice(6), 10) || 1);
       else await pageAlphas(main);
@@ -161,7 +162,8 @@ async function pageSubmit(main) {
       h("p", {}, sb.message || ""),
       res.params && res.params.length ? h("p", { class: "muted" }, "Tham số: ", h("span", { class: "mono" }, res.params.join(", "))) : null,
       errs.length ? h("div", {}, h("p", {}, `Lỗi (${errs.length}):`), h("ul", {}, errs.map((e) => h("li", { class: "mono err" }, e)))) : null,
-      h("p", { class: "muted mono" }, `sha256 ${sb.sha256 || ""} · ${sb.size || 0} byte · nộp ${sb.created} UTC`)));
+      h("p", { class: "muted mono" }, `sha256 ${sb.sha256 || ""} · ${sb.size || 0} byte · nộp ${sb.created} UTC`),
+      h("a", { class: "btn", href: "#/ask?sub=" + sb.id }, "Hỏi AI về bản nộp này")));
   }
 
   async function load() {
@@ -365,6 +367,54 @@ function engineText(e) {
   return `engine ${e.version}` + (e.commit && e.commit.includes("dirty") ? " (đang sửa)" : "") + (e.sha ? ` · ${String(e.sha).slice(0, 8)}` : "");
 }
 
+/* ---------- Hỏi AI ---------- */
+async function pageAsk(main, params) {
+  let ref = params.get("job") ? { job_id: params.get("job"), label: "job #" + params.get("job") }
+    : params.get("sub") ? { submission_id: params.get("sub"), label: "bản nộp #" + params.get("sub") } : null;
+  const ta = h("textarea", { rows: "4", maxlength: "2000", placeholder: "Ví dụ: Vì sao job này không có lệnh nào? Vì sao bản nộp bị từ chối?", class: "askbox" });
+  const refBox = h("div", {});
+  const info = h("p", { class: "muted" });
+  const err = h("p", { class: "err" });
+  const list = h("div", {});
+  function drawRef() {
+    refBox.replaceChildren(ref ? h("p", {}, "Câu hỏi về ", h("b", {}, ref.label), " ",
+      h("button", { class: "btn", on: { click: () => { ref = null; drawRef(); } } }, "Bỏ liên kết")) : h("p", { class: "muted" }, "Câu hỏi chung (muốn hỏi về một job hay bản nộp cụ thể, bấm nút \"Hỏi AI\" trong trang đó)."));
+  }
+  const btn = h("button", { class: "btn primary", on: { click: async () => {
+    err.textContent = "";
+    const q = ta.value.trim();
+    if (!q) { err.textContent = "Nhập câu hỏi trước."; return; }
+    btn.disabled = true;
+    const body = { question: q };
+    if (ref && ref.job_id) body.job_id = ref.job_id;
+    if (ref && ref.submission_id) body.submission_id = ref.submission_id;
+    const r = await api("/api/ask", body);
+    btn.disabled = false;
+    if (!r.ok) { err.textContent = r.error || "Lỗi"; return; }
+    ta.value = ""; await load();
+  } } }, "Gửi câu hỏi");
+  main.replaceChildren(h("h2", {}, "Hỏi AI"),
+    h("div", { class: "card" }, h("p", { class: "muted" }, "Trợ lý AI xem dữ liệu của chính bạn (job, bản nộp, chẩn đoán từ data-server) để giải thích lỗi và hướng sửa. ",
+      "Trợ lý không xem được dữ liệu của người khác, không chạy hay sửa gì, và có thể sai: kiểm tra lại trước khi làm theo."),
+      refBox, ta, h("div", { class: "row" }, btn, info), err),
+    h("div", { class: "card" }, h("h3", {}, "Câu hỏi của bạn"), list));
+  drawRef();
+  let pending = false;
+  async function load() {
+    const r = await api("/api/ask");
+    info.textContent = `Đã hỏi ${r.used_24h}/${r.per_day} câu trong 24 giờ`;
+    pending = r.questions.some((x) => x.status === "queued" || x.status === "dispatched");
+    list.replaceChildren(...(r.questions.length ? r.questions.map((x) => h("div", { class: "qa" },
+      h("div", { class: "qa-q" }, h("span", { class: "muted small" }, `#${x.id} · ${x.created} UTC` + (x.kind === "job" ? ` · job #${x.ref_id}` : x.kind === "submission" ? ` · bản nộp #${x.ref_id}` : "")), " ",
+        x.status === "done" ? null : tag(x.status === "dispatched" ? "running" : x.status), h("div", { class: "qa-text" }, x.question)),
+      x.status === "done" || x.status === "failed" ? h("div", { class: "qa-a" + (x.status === "failed" ? " err" : "") }, x.answer || "")
+        : h("div", { class: "qa-a muted" }, x.notice || (x.status === "dispatched" ? "Trợ lý đang trả lời (thường 20-60 giây)…" : "Đang chờ trợ lý nhận câu hỏi…"))))
+      : [h("p", { class: "muted" }, "Chưa có câu hỏi nào.")]));
+  }
+  await load();
+  timers.push(setInterval(() => { if (pending) load().catch(() => {}); }, 3000));
+}
+
 /* ---------- OS1 ---------- */
 const yesNo = (v) => v === true ? "có" : v === false ? "không" : "-";
 function os1Tag(o) {
@@ -530,6 +580,7 @@ async function pageJob(main, id) {
       h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate} · swap ${c.swap_mode} · ${c.variants} biến thể`),
       h("p", { class: "mono muted" }, Object.entries(c.params).filter(([, v]) => v[1] > 0).map(([k, v]) => `${k}: ${v[0]}→${v[2]} step ${v[1]}`).join("  |  ") || "(không có lưới)")],
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,
+      !live ? h("a", { class: "btn", href: "#/ask?job=" + job.id }, "Hỏi AI về job này") : null,
       job.summary && c.type !== "os1" ? h("p", {}, `Kết quả: ${job.summary.variants} biến thể, ${job.summary.is_pass} pass IS, ${job.summary.minutes} phút. Thư mục báo cáo trên data-server: ${job.summary.report || ""}`) : null);
     const ver = job.summary && job.summary.report ? String(job.summary.report).split(/[\/]/).pop() : "";
     const eng = job.summary ? engineText(job.summary.engine) : "";

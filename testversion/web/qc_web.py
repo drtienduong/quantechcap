@@ -44,6 +44,9 @@ KIT_FILES = {"HUONG_DAN.md", "AI_GUIDE.md", "qc_alpha_api.rs", "alpha_template.r
              "example_tick_range_breakout.rs", "reserved_names.txt", "local_check.rs"}
 KIT_ZIP = "quantechcap_alpha_kit.zip"
 MAX_ALPHA_BYTES = 200_000
+ASK_PER_DAY = int(os.environ.get("QC_ASK_PER_DAY", 20))   # câu hỏi AI tối đa mỗi ngày / trader
+ASK_MAX_CHARS = 2000
+ASK_STALE_SEC = 600            # câu hỏi đã giao cho data-server quá 10 phút chưa có trả lời -> lỗi, hỏi lại
 SUB_PER_HOUR = 30          # số lần nộp alpha tối đa mỗi giờ / trader
 SUB_MAX_OPEN = 3           # số bản nộp đang chờ kiểm tra cùng lúc / trader
 SUB_STATUSES = ("queued", "checking", "rejected", "pending_review", "approved", "review_rejected", "failed")
@@ -107,6 +110,8 @@ create table if not exists variants(job_id integer not null, run_id integer not 
 create table if not exists requests(id integer primary key autoincrement, user_id integer not null, job_id integer not null,
   kind text, payload_json text, status text, result_json text, created real);
 create table if not exists meta(k text primary key, v text);
+create table if not exists questions(id integer primary key autoincrement, user_id integer not null, kind text,
+  ref_id integer, question text not null, status text, answer text, created text, answered text, dispatched_at real);
 create table if not exists submissions(id integer primary key autoincrement, user_id integer not null, name text not null,
   source text, sha256 text, size integer, status text, message text default '', result_json text, created text, updated text);
 """
@@ -255,6 +260,8 @@ def sweep_once():
         con.execute("update submissions set status='failed', updated=?, message=? where status='checking' and updated < ?",
                     (now_iso(), "Data-server không trả kết quả kiểm tra (có thể vừa khởi động lại). Mã đã được xóa khỏi web, "
                                 "hãy nộp lại file.", cutoff))
+        con.execute("update questions set status='failed', answered=?, answer=? where status='dispatched' and dispatched_at < ?",
+                    (now_iso(), "Trợ lý AI chưa trả lời kịp (data-server có thể vừa khởi động lại). Hãy hỏi lại.", now - ASK_STALE_SEC))
         d = desk_state(con)
         stable = d["online"] and now - meta_f(con, "desk_online_since") > DESK_STABLE_SEC
         if stable:
@@ -504,6 +511,16 @@ class Handler(BaseHTTPRequestHandler):
                                        "jobs": [dict(self.job_row(r), notice=job_notice(con, r)) for r in rows]})
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
+            if parts == ["ask"] and method == "POST":
+                return self.create_question(con, uid)
+            if parts == ["ask"] and method == "GET":
+                rows = con.execute("select id, kind, ref_id, question, status, answer, created, answered from questions "
+                                   "where user_id=? order by id desc limit 30", (uid,)).fetchall()
+                since = datetime.fromtimestamp(time.time() - 86400, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                used = con.execute("select count(*) from questions where user_id=? and created >= ?", (uid, since)).fetchone()[0]
+                note = offline_note(con, "Câu hỏi")
+                return self.send_json({"ok": True, "per_day": ASK_PER_DAY, "used_24h": used,
+                                       "questions": [dict(r, notice=note if r["status"] == "queued" else "") for r in rows]})
             if parts == ["ispass"] and method == "GET":
                 return self.ispass_list(con, uid, q)
             if parts == ["os1"] and method == "POST":
@@ -565,6 +582,70 @@ class Handler(BaseHTTPRequestHandler):
                           (uid, clean["type"], clean["alpha"], json.dumps(clean), "queued", now_iso(), time.time()))
         con.commit()
         self.send_json({"ok": True, "id": cur.lastrowid})
+
+    def create_question(self, con, uid):
+        """Trader hỏi trợ lý AI. Câu hỏi chờ data-server lấy về; ngữ cảnh chỉ gồm dữ liệu của chính trader."""
+        try:
+            body = self.read_json()
+        except Exception:
+            return self.fail(400, "JSON không hợp lệ")
+        q = str(body.get("question", "")).strip() if isinstance(body, dict) else ""
+        if not q or len(q) > ASK_MAX_CHARS:
+            return self.fail(400, f"câu hỏi phải có nội dung và tối đa {ASK_MAX_CHARS} ký tự")
+        kind, ref = "general", None
+        if body.get("job_id"):
+            ref = int(body["job_id"]) if str(body["job_id"]).isdigit() else 0
+            if not con.execute("select 1 from jobs where id=? and user_id=?", (ref, uid)).fetchone():
+                return self.fail(404, "không có job này")
+            kind = "job"
+        elif body.get("submission_id"):
+            ref = int(body["submission_id"]) if str(body["submission_id"]).isdigit() else 0
+            if not con.execute("select 1 from submissions where id=? and user_id=?", (ref, uid)).fetchone():
+                return self.fail(404, "không có bản nộp này")
+            kind = "submission"
+        since = datetime.fromtimestamp(time.time() - 86400, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        if con.execute("select count(*) from questions where user_id=? and created >= ?", (uid, since)).fetchone()[0] >= ASK_PER_DAY:
+            return self.fail(429, f"đã hỏi đủ {ASK_PER_DAY} câu trong 24 giờ, hãy thử lại sau")
+        if con.execute("select count(*) from questions where user_id=? and status in ('queued','dispatched')", (uid,)).fetchone()[0] >= 2:
+            return self.fail(429, "đang có câu hỏi chờ trả lời, đợi xong rồi hỏi tiếp")
+        cur = con.execute("insert into questions(user_id,kind,ref_id,question,status,created) values(?,?,?,?,?,?)",
+                          (uid, kind, ref, q, "queued", now_iso()))
+        con.commit()
+        return self.send_json({"ok": True, "id": cur.lastrowid})
+
+    def question_payload(self, con, qrow):
+        """Dữ liệu web gửi kèm câu hỏi cho data-server: CHỈ của trader hỏi (không mã alpha, không dữ liệu trader khác)."""
+        uid = qrow["user_id"]
+        u = con.execute("select slug, os1_access from users where id=?", (uid,)).fetchone()
+        out = {"id": qrow["id"], "slug": u["slug"], "kind": qrow["kind"], "question": qrow["question"],
+               "account": {"os1_access": bool(u["os1_access"]), "alpha_suffix": alpha_suffix(u["slug"]),
+                           "todate_max": LIMITS["os1_end"] if u["os1_access"] else LIMITS["is_end"]}}
+        if qrow["kind"] == "job":
+            j = con.execute("select * from jobs where id=? and user_id=?", (qrow["ref_id"], uid)).fetchone()
+            if j:
+                n, zero, tot = con.execute("select count(*), sum(case when coalesce(trades,0)=0 then 1 else 0 end), coalesce(sum(trades),0) "
+                                           "from variants where job_id=?", (j["id"],)).fetchone()
+                stop, rej = con.execute("select coalesce(sum(stopped_out),0), coalesce(sum(rejected_orders),0) from variants where job_id=?",
+                                        (j["id"],)).fetchone()
+                out["job"] = {"id": j["id"], "type": j["type"], "alpha": j["alpha"], "status": j["status"], "message": j["message"],
+                              "created": j["created"], "config": json.loads(j["config_json"] or "{}"),
+                              "summary": json.loads(j["summary_json"]) if j["summary_json"] else None, "notice": job_notice(con, j),
+                              "variants": n, "variants_zero_trades": zero or 0, "total_trades": tot,
+                              "variants_stopped_out": stop, "rejected_orders": rej}
+        elif qrow["kind"] == "submission":
+            sb = con.execute("select id, name, status, message, result_json, created from submissions where id=? and user_id=?",
+                             (qrow["ref_id"], uid)).fetchone()
+            if sb:
+                out["submission"] = {k: sb[k] for k in ("id", "name", "status", "message", "created")}
+                out["submission"]["result"] = json.loads(sb["result_json"] or "null")
+        out["recent_jobs"] = [dict(r) for r in con.execute(
+            "select id, type, alpha, status, substr(message,1,200) as message, created from jobs where user_id=? "
+            "and type!='offline' order by id desc limit 6", (uid,))]
+        out["recent_submissions"] = [dict(r) for r in con.execute(
+            "select id, name, status, substr(message,1,200) as message, created from submissions where user_id=? order by id desc limit 6", (uid,))]
+        out["alphas"] = [{"name": r["name"], "meta": json.loads(r["meta_json"] or "{}"), "params": list(json.loads(r["params_json"]).keys())}
+                         for r in con.execute("select name, params_json, meta_json from alphas where user_id=? order by name", (uid,))]
+        return out
 
     ISPASS_SQL = ("from variants v join jobs j on j.id=v.job_id where j.user_id=? and j.type='optimize_is' "
                   "and j.status='done' and v.is_pass=1 and coalesce(v.stopped_out,0)=0")
@@ -746,6 +827,14 @@ class Handler(BaseHTTPRequestHandler):
                                     (u["id"], a["name"], json.dumps(a["params"]), json.dumps(meta), now_iso()))
                 con.commit()
                 return self.send_json({"ok": True, "count": len(items)})
+            if len(parts) == 3 and parts[0] == "questions" and parts[1].isdigit() and parts[2] == "answer" and method == "POST":
+                body = self.read_json()
+                ok = bool(body.get("ok"))
+                ans = str(body.get("answer", ""))[:8000]
+                con.execute("update questions set status=?, answer=?, answered=? where id=? and status='dispatched'",
+                            ("done" if ok else "failed", ans, now_iso(), int(parts[1])))
+                con.commit()
+                return self.send_json({"ok": True})
             if parts == ["import"] and method == "POST":
                 return self.desk_import(con, self.read_json())
             if len(parts) == 3 and parts[0] == "jobs" and parts[1].isdigit():
@@ -781,6 +870,7 @@ class Handler(BaseHTTPRequestHandler):
             lanes = {"heavy", "smoke"} if q.get("accept_jobs", ["1"])[0] == "1" else set()
         types = [t for t in C.DISPATCH_TYPES if ("smoke" if t == "smoke" else "heavy") in lanes]
         accept_sub = q.get("accept_sub", ["0"])[0] == "1"
+        accept_q = q.get("accept_q", ["0"])[0] == "1"
         end = time.time() + wait
         while True:
             item = None
@@ -792,6 +882,12 @@ class Handler(BaseHTTPRequestHandler):
                     con.commit()
                     item = {"type": "request", "request": {"id": r["id"], "slug": r["slug"], "kind": r["kind"],
                                                            "job_id": r["job_id"], "payload": json.loads(r["payload_json"])}}
+                if not item and accept_q:
+                    qr = con.execute("select * from questions where status='queued' order by id limit 1").fetchone()
+                    if qr:
+                        con.execute("update questions set status='dispatched', dispatched_at=? where id=?", (time.time(), qr["id"]))
+                        con.commit()
+                        item = {"type": "question", "question": self.question_payload(con, qr)}
                 if not item and accept_sub:
                     sb = con.execute("select s.id, s.name, s.source, s.sha256, u.slug from submissions s "
                                      "join users u on u.id=s.user_id where s.status='queued' order by s.id limit 1").fetchone()
