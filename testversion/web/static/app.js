@@ -293,7 +293,7 @@ async function pageRun(main, name) {
       ST.groups.filter((g) => g !== "FX").map((g) => h("button", { class: "btn", on: { click: () => addSyms(groupSyms(g)) } }, "+ " + g)),
       h("button", { class: "btn", on: { click: () => setSyms([]) } }, "Bỏ hết")),
       h("div", { class: "symbox" }, symGroups),
-      h("p", { class: "muted" }, "Point value/lot tự đặt theo symbol: FX 100000 (ô bên dưới), XAUUSD 100, XAGUSD 5000, dầu 1000, chỉ số 1 (HKGIDXHKD 100), crypto 1. ",
+      h("p", { class: "muted" }, "Point value/lot tự đặt theo symbol: FX 100000 (ô bên dưới), XAUUSD 100, XAGUSD 5000, đồng 25000 lb, dầu 1000, cacao 10 tấn, đường 50 tấn, cà phê 37500 lb, bông 50000 lb, nước cam 15000 lb (3 loại cuối báo giá bằng cent, engine tự quy đổi), chỉ số 1 (HKGIDXHKD 100), crypto 1. ",
         "Swap synthetic chỉ có cho FX và XAUUSD. Dữ liệu *_BN (Binance) là tick tổng hợp từ nến 1 phút. Rê chuột lên symbol để xem ngày bắt đầu dữ liệu."),
       h("p", { class: "warn" }, "Lưu ý: alpha dùng thông tin tài khoản (…_with_account) chỉ giao dịch ở chế độ Portfolio; chế độ \"Từng symbol riêng\" có thể ra 0 lệnh.")),
     h("div", { class: "card" }, h("h3", {}, "Tài khoản"), h("div", { class: "row" },

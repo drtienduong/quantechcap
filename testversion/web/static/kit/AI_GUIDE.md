@@ -73,7 +73,9 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
   override `fn wants_account(&self) -> bool { true }` (then Independent mode calls them with that symbol's own account).
 - The alpha is not told the symbol or its point size in Independent mode. The pattern
   `fn point_size(price: f64) -> f64 { if price >= 20.0 { 0.001 } else { 0.00001 } }` is only valid for FX
-  (JPY pairs vs others). Symbols available besides FX: metals (XAUUSD, XAGUSD), energy (BRENTCMDUSD, LIGHTCMDUSD),
+  (JPY pairs vs others). Symbols available besides FX: metals (XAUUSD, XAGUSD, COPPERCMDUSD), energy (BRENTCMDUSD, LIGHTCMDUSD),
+  agricultural (COCOACMDUSD, SUGARCMDUSD in USD/tonne; COFFEECMDUSX, COTTONCMDUSX, OJUICECMDUSX quoted in US CENTS per lb,
+  data from late 2017 only),
   indices (USA500IDXUSD, USATECHIDXUSD, DEUIDXEUR, GBRIDXGBP, EUSIDXEUR, ESPIDXEUR, AUSIDXAUD, HKGIDXHKD), crypto (BTCUSD, ETHUSD and
   Binance *_BN pairs). If the alpha may run on non-FX symbols, express SL/TP and thresholds RELATIVE to price
   (ATR multiples or a percent of price), never as FX points.

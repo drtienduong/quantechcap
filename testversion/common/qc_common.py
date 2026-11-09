@@ -42,8 +42,17 @@ SYMBOLS.update({
     "BNBUSDT_BN": ("Crypto", 1.0, "2017.11.06", False),
     "LTCUSDT_BN": ("Crypto", 1.0, "2017.12.13", False),
     "NEOUSDT_BN": ("Crypto", 1.0, "2017.11.20", False),
+    # thêm 2026-11-09 từ TickStory CSV (đã bỏ tick ask<bid; copper bỏ ngày 2012-03-01 sai thang giá).
+    # Point value = kích thước hợp đồng sàn gốc / lot (Dương duyệt). Đuôi USX = giá bằng US cent: engine >= 2026.11.09
+    # tự nhân 0.01 nên lãi khi giá đổi 1.0 (1 cent) = point value x 0.01 USD.
+    "COPPERCMDUSD": ("Kim loại", 25000.0, "2012.03.02", False),   # 25.000 lb, giá USD/lb
+    "COCOACMDUSD": ("Nông sản", 10.0, "2017.10.20", False),       # 10 tấn, giá USD/tấn
+    "COFFEECMDUSX": ("Nông sản", 37500.0, "2017.12.05", False),   # 37.500 lb, giá cent/lb
+    "COTTONCMDUSX": ("Nông sản", 50000.0, "2017.10.23", False),   # 50.000 lb, giá cent/lb
+    "OJUICECMDUSX": ("Nông sản", 15000.0, "2017.10.23", False),   # 15.000 lb, giá cent/lb
+    "SUGARCMDUSD": ("Nông sản", 50.0, "2017.10.03", False),       # 50 tấn, giá USD/tấn
 })
-GROUPS = ["FX", "Kim loại", "Năng lượng", "Chỉ số", "Crypto"]
+GROUPS = ["FX", "Kim loại", "Năng lượng", "Nông sản", "Chỉ số", "Crypto"]
 SYMBOL_ORDER = list(FX25) + [s for g in GROUPS for s in SYMBOLS if SYMBOLS[s][0] == g and s not in FX25]
 
 
