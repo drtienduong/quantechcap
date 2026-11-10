@@ -666,16 +666,34 @@ function drawEquity(canvas, pts) {
 function buildViewer(id, job) {
   const c = job.config;
   const optKeys = new Set(Object.entries(c.params || {}).filter(([, v]) => v[1] > 0).map(([k]) => vkey(k)));
-  const S = { sort: "fitness", dir: "desc", pass: false, offset: 0, sel: null, rows: [], total: 0, page: 100, token: 0 };
+  const S = { sort: "fitness", dir: "desc", pass: false, traded: false, q: "", symbol: "", offset: 0, sel: null, rows: [], total: 0, page: 100, token: 0 };
 
   // --- cột trái: bộ lọc + danh sách run ---
   const sortSel = h("select", { on: { change: (e) => { S.sort = e.target.value; S.offset = 0; loadRuns(); } } },
-    [["fitness", "Fitness"], ["sharpe", "Custom Sharpe"], ["net_profit", "Profit"], ["dd", "Drawdown %"], ["trades", "Trades"], ["recent", "Sharpe 3 năm"], ["run_id", "Run ID"]]
+    [["fitness", "Fitness"], ["sharpe", "Custom Sharpe"], ["net_profit", "Profit"], ["pf", "Profit Factor"], ["recovery", "Recovery Factor"],
+     ["dd", "Drawdown %"], ["winrate", "Winrate"], ["tit", "Time in trade"], ["trades", "Trades"], ["recent", "Sharpe 3 năm"], ["run_id", "Run ID"]]
       .map(([v, l]) => h("option", { value: v }, l)));
   const dirSel = h("select", { on: { change: (e) => { S.dir = e.target.value; S.offset = 0; loadRuns(); } } },
     h("option", { value: "desc" }, "Desc"), h("option", { value: "asc" }, "Asc"));
   const passCb = h("input", { type: "checkbox", on: { change: (e) => { S.pass = e.target.checked; S.offset = 0; loadRuns(); } } });
-  const filterBody = h("div", {}, h("label", {}, "Sort by", sortSel), h("label", {}, "Direction", dirSel), h("label", { class: "chk" }, passCb, " Chỉ biến thể pass IS"));
+  let tmr = null;
+  const reload = () => { clearTimeout(tmr); tmr = setTimeout(() => { S.offset = 0; loadRuns(); }, 300); };
+  const searchIn = h("input", { type: "search", placeholder: "Run ID, symbol, tham số", on: { input: (e) => { S.q = e.target.value; reload(); } } });
+  const symSel = h("select", { on: { change: (e) => { S.symbol = e.target.value; S.offset = 0; loadRuns(); } } }, h("option", { value: "" }, "Tất cả symbol"));
+  const symWrap = h("label", {}, "Symbol", symSel);
+  symWrap.style.display = "none";
+  const tradedCb = h("input", { type: "checkbox", on: { change: (e) => { S.traded = e.target.checked; S.offset = 0; loadRuns(); } } });
+  // khoảng giá trị cho các tham số được tối ưu (bước > 0), như mục Optimized inputs của Rust Quant Viewer
+  const optParams = Object.entries(c.params || {}).filter(([, v]) => Array.isArray(v) && v[1] > 0);
+  const pRanges = optParams.map(([k, v]) => ({ k, min: h("input", { type: "number", step: "any", placeholder: "Min " + v[0], on: { input: reload } }),
+    max: h("input", { type: "number", step: "any", placeholder: "Max " + v[2], on: { input: reload } }) }));
+  const pfPayload = () => pRanges.map((r) => ({ key: r.k, min: r.min.value, max: r.max.value })).filter((r) => r.min !== "" || r.max !== "");
+  const clearBtn = h("button", { class: "vwtoggle", on: { click: () => { pRanges.forEach((r) => { r.min.value = ""; r.max.value = ""; }); S.offset = 0; loadRuns(); } } }, "Clear");
+  const paramBox = pRanges.length ? h("div", { class: "vwparams" }, h("div", { class: "vwhead" }, h("strong", {}, "Tham số tối ưu"), clearBtn),
+    pRanges.map((r) => h("div", { class: "vwprange" }, h("span", { class: "mono" }, r.k), h("div", {}, r.min, r.max)))) : null;
+  const filterBody = h("div", {}, h("label", {}, "Tìm", searchIn), symWrap, paramBox,
+    h("label", {}, "Sort by", sortSel), h("label", {}, "Direction", dirSel),
+    h("label", { class: "chk" }, passCb, " Chỉ biến thể pass IS"), h("label", { class: "chk" }, tradedCb, " Chỉ biến thể có lệnh"));
   const toggleBtn = h("button", { class: "vwtoggle", on: { click: () => { filterBody.hidden = !filterBody.hidden; toggleBtn.textContent = filterBody.hidden ? "Show" : "Hide"; } } }, "Hide");
   const runCount = h("span", { class: "muted" }, "0");
   const runList = h("div", { class: "vwruns" });
@@ -685,7 +703,7 @@ function buildViewer(id, job) {
     runCount.textContent = `${S.rows.length}/${S.total}`;
     runList.replaceChildren(...(S.rows.length ? S.rows.map((v) => h("div", { class: "vwrun" + (v.run_id === S.sel ? " active" : ""), on: { click: () => selectRun(v) } },
       h("strong", {}, `${v.symbol} ${c.period}`),
-      h("div", { class: "vwmeta" }, h("span", {}, Object.entries(v.params).filter(([k]) => optKeys.has(vkey(k))).map(([k, x]) => `${k}=${x}`).join(" ") || "-"), h("span", {}, `run ${v.run_id}${v.is_pass ? " ✓" : ""}`)),
+      h("div", { class: "vwmeta" }, h("span", {}, Object.entries(v.params).filter(([k]) => optKeys.has(vkey(k))).map(([k, x]) => `${k}=${typeof x === "number" ? +x.toPrecision(10) : x}`).join(" ") || "-"), h("span", {}, `run ${v.run_id}${v.is_pass ? " ✓" : ""}`)),
       v.stopped_out ? h("div", { class: "vwmeta" }, h("span", { class: "tag failed", title: "Margin level xuống dưới mức stop-out: engine đóng lệnh và dừng biến thể này" }, "STOP-OUT")) : null,
       h("div", { class: "vwmeta" }, h("span", {}, `Sharpe ${vfmt(v.sharpe)}`), h("span", {}, `PF ${vfmt(v.pf)}`), h("span", {}, `P ${vfmt(v.net_profit, 2)}`))))
       : [h("p", { class: "muted" }, "Không có kết quả.")]));
@@ -696,8 +714,14 @@ function buildViewer(id, job) {
       h("button", { class: "btn", disabled: end >= S.total, on: { click: () => { S.offset += S.page; loadRuns(); } } }, "›"));
   }
   async function loadRuns() {
-    const r = await api(`/api/jobs/${id}/variants?sort=${S.sort}&dir=${S.dir}&offset=${S.offset}&pass=${S.pass ? 1 : 0}`);
+    const qs = new URLSearchParams({ sort: S.sort, dir: S.dir, offset: S.offset, pass: S.pass ? 1 : 0, traded: S.traded ? 1 : 0 });
+    if (S.q.trim()) qs.set("q", S.q.trim());
+    if (S.symbol) qs.set("symbol", S.symbol);
+    const pf = pfPayload();
+    if (pf.length) qs.set("pf", JSON.stringify(pf));
+    const r = await api(`/api/jobs/${id}/variants?${qs}`);
     S.rows = r.rows; S.total = r.total; S.page = r.page;
+    if (symSel.options.length === 1 && (r.symbols || []).length > 1) { symSel.append(...r.symbols.map((x) => h("option", { value: x }, x))); symWrap.style.display = ""; }
     renderRuns();
     if (S.sel === null && S.rows.length) selectRun(S.rows[0]);
   }

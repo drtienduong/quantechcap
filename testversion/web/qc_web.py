@@ -770,14 +770,49 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True})
         if rest == ["variants"] and method == "GET":
             sort = {"fitness": "fitness", "sharpe": "sharpe", "net_profit": "net_profit", "trades": "trades",
-                    "dd": "dd_pct", "run_id": "run_id", "recent": "recent_sharpe"}.get(q.get("sort", ["fitness"])[0], "fitness")
+                    "dd": "dd_pct", "run_id": "run_id", "recent": "recent_sharpe", "pf": "pf", "recovery": "recovery",
+                    "winrate": "winrate", "tit": "tit"}.get(q.get("sort", ["fitness"])[0], "fitness")
             order = "asc" if q.get("dir", ["desc"])[0] == "asc" else "desc"
             off = max(0, int(q.get("offset", ["0"])[0]))
-            where = "job_id=?" + (" and is_pass=1" if q.get("pass", ["0"])[0] == "1" else "")
-            total = con.execute(f"select count(*) from variants where {where}", (jid,)).fetchone()[0]
-            rows = con.execute(f"select * from variants where {where} order by {sort} {order} nulls last, run_id limit ? offset ?",
-                               (jid, PAGE, off)).fetchall()
-            return self.send_json({"ok": True, "total": total, "offset": off, "page": PAGE, "rows": [
+            # bộ lọc (giống Rust Quant Viewer): pass IS, có lệnh, symbol, tìm kiếm, khoảng giá trị tham số tối ưu
+            where, args = ["job_id=?"], [jid]
+            if q.get("pass", ["0"])[0] == "1":
+                where.append("is_pass=1")
+            if q.get("traded", ["0"])[0] == "1":
+                where.append("coalesce(trades,0)>0")
+            sym = q.get("symbol", [""])[0]
+            if sym:
+                where.append("symbol=?")
+                args.append(sym[:40])
+            term = q.get("q", [""])[0].strip()[:60]
+            if term:
+                where.append("(cast(run_id as text)=? or symbol like ? or params_json like ?)")
+                args += [term, f"%{term}%", f"%{term}%"]
+            try:
+                pfil = json.loads(q.get("pf", ["[]"])[0])
+            except ValueError:
+                pfil = []
+            allowed = set((json.loads(j["config_json"] or "{}").get("params") or {}).keys())
+            for f in pfil if isinstance(pfil, list) else []:
+                key = str(f.get("key", "")) if isinstance(f, dict) else ""
+                if key not in allowed or not C.NAME_RE.match(key):
+                    continue
+                for bound, op in (("min", ">="), ("max", "<=")):
+                    v = f.get(bound)
+                    if v in (None, ""):
+                        continue
+                    try:
+                        num = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    where.append(f"cast(json_extract(params_json, ?) as real) {op} ?")
+                    args += ['$."' + key + '"', num]
+            wsql = " and ".join(where)
+            total = con.execute(f"select count(*) from variants where {wsql}", args).fetchone()[0]
+            rows = con.execute(f"select * from variants where {wsql} order by {sort} {order} nulls last, run_id limit ? offset ?",
+                               args + [PAGE, off]).fetchall()
+            syms = [r[0] for r in con.execute("select distinct symbol from variants where job_id=? order by symbol", (jid,))]
+            return self.send_json({"ok": True, "total": total, "offset": off, "page": PAGE, "symbols": syms, "rows": [
                 {**{k: r[k] for k in r.keys() if k not in ("params_json", "job_id")}, "params": json.loads(r["params_json"])}
                 for r in rows]})
         if rest == ["request"] and method == "POST":

@@ -120,3 +120,9 @@ textarea.askbox{width:100%;font:inherit;padding:8px;border:1px solid var(--line)
 .qa-text{margin-top:4px;white-space:pre-wrap;font-weight:600}
 .qa-a{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);white-space:pre-wrap;line-height:1.55}
 @media(max-width:640px){textarea.askbox{font-size:16px}}
+
+/* ---- bộ lọc viewer: tìm, tham số tối ưu ---- */
+.vwp label input[type=search]{width:100%;margin-top:4px;padding:7px}
+.vwparams{margin-top:10px;border-top:1px solid #d9dee5;padding-top:8px}
+.vwprange{display:grid;grid-template-columns:minmax(80px,1fr) 2fr;gap:6px;align-items:center;margin:5px 0;font-size:12px}
+.vwprange>div{display:flex;gap:4px}.vwprange input{width:50%;min-width:0;padding:5px}
