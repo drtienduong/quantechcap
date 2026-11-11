@@ -679,6 +679,7 @@ def collect_variants(run_dir: Path):
 RUN_WAIT_MAX_MIN = 240          # chờ run khác (của web hoặc ngoài web) tối đa 4 giờ
 START_RETRIES = 4               # số lần thử khởi động lại khi tiến trình run thoát sớm
 STALL_WARN_MIN = 30             # không thấy tiến độ mới quá 30 phút -> ghi chú cho trader
+MAX_CONTINUES = 3               # run dừng giữa chừng -> tự chạy tiếp (giữ symbol đã xong) tối đa 3 lần mỗi job
 _PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"]+")
 
 
@@ -775,25 +776,24 @@ def run_job(job):
         lane.clear()
 
 
-def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail):
-    """Khởi động run qua rq_run (chờ nếu run khác đang chạy) rồi theo dõi đến khi xong."""
-    if True:
-        env = dict(os.environ, RQ_ROOT=RQ_ROOT, TRADER_DIR=str(t["dir"]), TRADER_NAME=t["name"])
-        cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
-               "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
-        timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
-        if smoke:
-            cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
-        upd(jid, status="running", message="Data-server đã nhận job, đang chuẩn bị chạy", progress=0)
+def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, continue_run=None, attach=None, t0=None):
+    """Khởi động run qua rq_run (chờ nếu run khác đang chạy) rồi theo dõi đến khi xong.
+    continue_run=<run_id>: chạy tiếp run đã dừng (engine giữ kết quả các symbol đã xong).
+    attach=<file trạng thái>: run vẫn đang chạy (desk vừa khởi động lại) -> chỉ theo dõi tiếp.
+    Run chết giữa chừng -> tự chạy tiếp, tối đa MAX_CONTINUES lần."""
+    env = dict(os.environ, RQ_ROOT=RQ_ROOT, TRADER_DIR=str(t["dir"]), TRADER_NAME=t["name"])
+    timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
+    t0 = t0 or time.time()
 
-        status_path, t_wait, starts = None, time.time(), 0
-        while status_path is None:
+    def launch(cmd):
+        """Chạy rq_run (chờ khi run khác giữ giới hạn CPU). Trả về file trạng thái, hoặc None nếu đã báo lỗi/hủy."""
+        t_wait, starts = time.time(), 0
+        while True:
             waited = (time.time() - t_wait) / 60
             if waited > RUN_WAIT_MAX_MIN:
-                return fail(f"Data-server bận quá {RUN_WAIT_MAX_MIN} phút nên job chưa chạy được. Hãy gửi lại sau.")
-            others = rq_runs_active()
-            out = ""
-            if not others:
+                fail(f"Data-server bận quá {RUN_WAIT_MAX_MIN} phút nên job chưa chạy được. Hãy gửi lại sau.")
+                return None
+            if not rq_runs_active():
                 r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
                 out = (r.stdout or "") + (r.stderr or "")
                 m = re.search(r"STARTED run_id=(\S+) status=(.+)", out)
@@ -804,22 +804,52 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail):
                             break
                         time.sleep(0.5)
                     if sp.exists():
-                        status_path = sp
-                        break
+                        return sp
                     starts += 1                    # tiến trình run thoát sớm (thường do run khác vừa chen vào)
                     log(f"job {jid}: run thoát sớm (lần {starts})")
                     if starts >= START_RETRIES:
-                        return fail("Data-server không khởi động được run sau nhiều lần thử. "
-                                    "Hãy chạy lại sau ít phút; nếu vẫn lỗi, báo quản trị kèm số job.")
+                        fail("Data-server không khởi động được run sau nhiều lần thử. "
+                             "Hãy chạy lại sau ít phút; nếu vẫn lỗi, báo quản trị kèm số job.")
+                        return None
                     continue
                 if "BUSY" not in out:
-                    return fail("Data-server từ chối chạy: " + _PATH_RE.sub("<đường dẫn>", out.strip()[-300:]))
+                    fail("Data-server từ chối chạy: " + _PATH_RE.sub("<đường dẫn>", out.strip()[-300:]))
+                    return None
             resp = upd(jid, message=f"Data-server đang chạy một run khác; job của bạn sẽ tự bắt đầu khi run đó xong "
                                     f"(đã chờ {waited:.0f} phút)")
             if resp.get("cancel"):
-                return upd(jid, status="cancelled", message="Đã hủy trước khi chạy")
+                upd(jid, status="cancelled", message="Đã hủy trước khi chạy")
+                return None
             time.sleep(20)
-        monitor_job(jid, slug, t, status_path, time.time(), timeout_min)
+
+    def continue_cmd(run_id):
+        return [PY, str(TOOLS / "rq_run.py"), "--continue-run", run_id, "--timeout-min", str(timeout_min)]
+
+    tries = 0
+    if attach:
+        status_path = attach
+    else:
+        if continue_run:
+            tries = 1
+            upd(jid, status="running", message="Data-server vừa khởi động lại: đang chạy tiếp job, giữ kết quả các symbol đã xong")
+            cmd = continue_cmd(continue_run)
+        else:
+            upd(jid, status="running", message="Data-server đã nhận job, đang chuẩn bị chạy", progress=0)
+            cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
+                   "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
+            if smoke:
+                cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
+        status_path = launch(cmd)
+    while status_path is not None:
+        res = monitor_job(jid, slug, t, status_path, t0, timeout_min)
+        if res != "dead":
+            return
+        tries += 1
+        if tries > MAX_CONTINUES:
+            return fail(f"Run bị dừng giữa chừng {MAX_CONTINUES} lần. Hãy bấm \"Chạy lại job này\"; nếu lặp lại, báo quản trị kèm số job.")
+        log(f"job {jid}: run {status_path.stem} dừng giữa chừng -> chạy tiếp (lần {tries})")
+        upd(jid, message="Run bị dừng giữa chừng, đang chạy tiếp (giữ kết quả các symbol đã xong)")
+        status_path = launch(continue_cmd(status_path.stem))
 
 
 def monitor_job(jid, slug, t, status_path, t0, timeout_min):
@@ -830,6 +860,7 @@ def monitor_job(jid, slug, t, status_path, t0, timeout_min):
 
     run_id = status_path.stem
     last, dead_since, last_pct, pct_at = 0.0, None, None, time.time()
+    nopid_since = None
     st = {}
     while True:
         time.sleep(2)
@@ -842,9 +873,15 @@ def monitor_job(jid, slug, t, status_path, t0, timeout_min):
         if st.get("pid") and not pid_alive(st["pid"]):
             dead_since = dead_since or time.time()
             if time.time() - dead_since > 20:
-                return fail("Run dừng giữa chừng trên data-server (tiến trình bị tắt). Hãy bấm \"Chạy lại job này\".")
+                return "dead"                      # người gọi tự chạy tiếp (giữ symbol đã xong)
         else:
             dead_since = None
+        if not st.get("pid"):                      # đang khởi động bản chạy tiếp
+            nopid_since = nopid_since or time.time()
+            if time.time() - nopid_since > 180:
+                return "dead"
+        else:
+            nopid_since = None
         if time.time() - last >= 8:
             last = time.time()
             pct, txt = read_progress(run_id)
@@ -925,23 +962,30 @@ def recover_jobs():
         if st.get("state") == "done":
             log(f"nhận lại job {jid}: run đã xong -> gửi kết quả")
             threading.Thread(target=finish_job, args=(jid, slug, t, st, t0), daemon=True).start()
-        elif st.get("state") == "running" and st.get("pid") and pid_alive(st["pid"]):
-            log(f"nhận lại job {jid}: run vẫn chạy -> theo dõi tiếp")
-            lane = smoke_busy if smoke else heavy_busy
-            lane.set()
-            upd(jid, message="Data-server vừa khởi động lại, đã nhận lại job đang chạy")
-
-            def _mon(jid=jid, slug=slug, t=t, sp=sp, t0=t0, tm=timeout_min, lane=lane):
-                try:
-                    monitor_job(jid, slug, t, sp, t0, tm)
-                finally:
-                    lane.clear()
-            threading.Thread(target=_mon, daemon=True).start()
         elif st.get("state") == "failed":
             upd(jid, status="failed", message=engine_error_message(st, timeout_min))
         else:
-            log(f"nhận lại job {jid}: run đã chết -> lỗi")
-            upd(jid, status="failed", message="Run dừng giữa chừng khi data-server khởi động lại. Hãy bấm \"Chạy lại job này\".")
+            alive = st.get("state") == "running" and st.get("pid") and pid_alive(st["pid"])
+            if alive:
+                log(f"nhận lại job {jid}: run vẫn chạy -> theo dõi tiếp")
+                upd(jid, message="Data-server vừa khởi động lại, đã nhận lại job đang chạy")
+            else:
+                log(f"nhận lại job {jid}: run {sp.stem} dừng giữa chừng -> chạy tiếp")
+            lane = smoke_busy if smoke else heavy_busy
+            lane.set()
+
+            def _go(jid=jid, slug=slug, t=t, sp=sp, t0=t0, smoke=smoke, lane=lane, alive=alive):
+                def fail(msg):
+                    log(f"job {jid} lỗi: {msg}")
+                    upd(jid, status="failed", message=str(msg)[:480])
+                try:
+                    start_and_monitor(jid, slug, t, None, None, None, smoke, lane, fail,
+                                      continue_run=None if alive else sp.stem, attach=sp if alive else None, t0=t0)
+                except Exception as e:  # noqa: BLE001
+                    fail("Lỗi phía data-server khi chạy tiếp: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:300])
+                finally:
+                    lane.clear()
+            threading.Thread(target=_go, daemon=True).start()
 
 
 # ---------- nộp alpha: cách ly -> kiểm tra -> duyệt -> cài ----------
