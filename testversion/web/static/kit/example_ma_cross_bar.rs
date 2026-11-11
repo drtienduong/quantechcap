@@ -2,7 +2,7 @@
 // Ý tưởng: đường trung bình nhanh cắt đường trung bình chậm (SMA cross).
 //  - on_bar(): cập nhật chỉ báo khi một nến vừa đóng, ghi lại tín hiệu chờ.
 //  - on_tick(): đặt lệnh với SL/TP tính từ giá bid/ask thật của tick hiện tại.
-// Đổi tên file và chuỗi trong name() thành <tên_alpha>_<tên_trader>, ví dụ alpha_ma_cross_nguyen_an.
+// Đổi tên file và chuỗi trong name() thành <tên_alpha>, ví dụ alpha_ma_cross_v2 (platform tự thêm hậu tố tài khoản khi nộp).
 
 const MAGIC: u64 = 1001;
 

@@ -1,5 +1,5 @@
-// QuanTechCap - KHUNG ALPHA. Sao chép file này, đổi tên thành <tên_alpha>_<tên_trader>.rs
-// (chỉ chữ thường/hoa, số, dấu _), sửa phần TODO. Một alpha = một file .rs duy nhất.
+// QuanTechCap - KHUNG ALPHA. Sao chép file này, đổi tên thành <tên_alpha>.rs
+// (chỉ chữ thường/hoa, số, dấu _; platform tự thêm hậu tố tài khoản khi nộp), sửa phần TODO. Một alpha = một file .rs duy nhất.
 // Các kiểu Tick, Bar, AccountView, OrderSide, Signal, AlphaInput, ParameterSet, Alpha, HashMap, HashSet
 // có sẵn, KHÔNG import. Xem qc_alpha_api.rs và AI_GUIDE.md.
 
@@ -18,7 +18,7 @@ struct MyAlpha {
 
 impl Alpha for MyAlpha {
     fn name(&self) -> &'static str {
-        "alpha_myidea_trader" // TODO: trùng tên file (không có .rs)
+        "alpha_myidea" // TODO: trùng tên file (không có .rs); platform tự thêm hậu tố tài khoản khi nộp
     }
 
     // Gọi khi một nến (khung chọn trên web: M1..D1) vừa đóng. Nến dựng từ giá bid.

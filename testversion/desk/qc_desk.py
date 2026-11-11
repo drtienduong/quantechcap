@@ -1000,8 +1000,12 @@ def handle_submission(sb):
         qd = sub_dir(t, sid, name)
         qd.mkdir(parents=True, exist_ok=True)
         (qd / "source.rs").write_bytes(raw)          # khu cách ly: chưa vào thư mục alpha
+        # Platform tự đặt tên: fn name() luôn trả về tên cuối (có hậu tố trader), trader không phải sửa.
+        src, orig_fn_name = AC.set_fn_name(src, name)
+        if src.encode("utf-8") != raw:
+            (qd / "source.named.rs").write_text(src, encoding="utf-8", newline="\n")
         res = AC.check(src, RUNNER_TEMPLATE)
-        meta = {"id": sid, "slug": slug, "name": name, "sha256": sha, "size": len(raw),
+        meta = {"id": sid, "slug": slug, "name": name, "sha256": sha, "size": len(raw), "orig_fn_name": orig_fn_name,
                 "received": time.strftime("%Y-%m-%d %H:%M:%S"), "check": res}
         if not res["static_ok"]:
             meta["status"], msg = "rejected", SUB_MSG["rejected_static"].format(n=len(res["static_errors"]))

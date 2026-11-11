@@ -52,10 +52,10 @@ Phiên bản: **{day} · {ver}**. Trang này luôn là bản mới nhất: {page
 ## Cách dùng (cho trader)
 
 1. Mở một cuộc chat MỚI với AI có khả năng đọc web (Claude, ChatGPT...). Dán câu sau, kèm ý tưởng giao dịch của bạn:
-   `Đọc toàn bộ hướng dẫn tại {raw} trước khi viết. Viết MỘT file alpha .rs đúng theo hướng dẫn đó. Hậu tố tên của tôi là <hậu tố>. Ý tưởng: ...`
+   `Đọc toàn bộ hướng dẫn tại {raw} trước khi viết. Viết MỘT file alpha .rs đúng theo hướng dẫn đó. Ý tưởng: ...`
 2. Mỗi lần bắt đầu alpha mới, yêu cầu AI đọc lại link để dùng bộ khung mới nhất. Kiểm tra AI nêu đúng số phiên bản ở trên.
 3. AI không đọc được link (một số AI hoặc gói miễn phí không truy cập web): tải [bản offline (.zip)]({zipu}) hoặc [bản văn bản (.md)]({raw}), đính kèm toàn bộ vào chat.
-4. Nộp file `.rs` ở trang "Nộp alpha" trên web (cần đăng nhập). Hậu tố tên của bạn hiện trên trang đó.
+4. Nộp file `.rs` ở trang "Nộp alpha" trên web (cần đăng nhập). Đặt tên tùy ý: platform tự thêm hậu tố cố định của tài khoản bạn (ví dụ `_duong_tien`) vào tên alpha và vào `fn name()`.
 
 ## For the AI assistant
 

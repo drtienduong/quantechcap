@@ -16,8 +16,9 @@ https://research.quantechcap.com/guide_ai.md, offline copy in the zip linked the
 ## 1. File shape (required)
 
 - One `.rs` file, Rust edition 2024, plain `std` only, no external crates, no `Cargo.toml`.
-- File name: `<alpha_name>_<trader_suffix>.rs`, only `[A-Za-z0-9_]`, max 80 chars. The trader knows their suffix
-  (shown on the upload page). `fn name()` must return the same name as a string literal.
+- File name: `<alpha_name>.rs`, only `[A-Za-z0-9_]`, short and descriptive (e.g. `alpha_ma_cross_m5.rs`). Do NOT add
+  any trader suffix: the platform automatically appends the trader's fixed account suffix to the alpha name and sets
+  `fn name()` to that final name. `fn name()` must still return a string literal (use the same name as the file).
 - The API types (`Tick`, `Bar`, `AccountView`, `OrderSide`, `Signal`, `AlphaInput`, `ParameterSet`, `Alpha`,
   `HashMap`, `HashSet`) are already in scope. Do NOT import or redefine them.
 - Must contain exactly these public functions:

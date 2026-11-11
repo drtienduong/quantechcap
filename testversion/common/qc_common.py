@@ -78,6 +78,24 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
 DATE_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
 LEV_RE = re.compile(r"^1:\d{1,4}$")
 DEFAULT_LEVERAGE = "1:1000"
+
+
+def full_alpha_name(name, suffix):
+    """Tên trader gõ (bất kỳ) -> tên alpha cuối cùng = <tên>_<hậu tố trader>. Platform tự thêm hậu tố.
+    Bỏ '.rs', khoảng trắng hai đầu, đổi ký tự không hợp lệ thành '_'; đã có đúng hậu tố thì không thêm lần nữa.
+    Trả về (tên_cuối, lỗi). suffix dạng '_duong_tien'."""
+    if not isinstance(name, str):
+        return None, "thiếu tên alpha"
+    base = re.sub(r"\.rs$", "", name.strip(), flags=re.I)
+    base = re.sub(r"[^A-Za-z0-9_]+", "_", base).strip("_")
+    if base.endswith(suffix):
+        base = base[: -len(suffix)].rstrip("_")
+    if not base or base == suffix[1:]:
+        return None, "thiếu tên alpha"
+    full = base + suffix
+    if not NAME_RE.match(full):
+        return None, f"tên alpha quá dài: tối đa {80 - len(suffix)} ký tự (chưa kể hậu tố {suffix} platform tự thêm)"
+    return full, None
 MAX_LEVERAGE = 1000
 MARGIN_CALL_LEVEL = 100   # %: mở lệnh mới bị từ chối nếu free margin < 0 hoặc margin level < mức này
 STOPOUT_LEVEL = 50        # %: margin level dưới mức này thì đóng lệnh lỗ lớn nhất trước, rồi dừng backtest

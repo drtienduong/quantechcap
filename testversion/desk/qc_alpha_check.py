@@ -483,7 +483,7 @@ def static_check(src, reserved):
     m = re.search(r'fn\s+name\s*\(\s*&\s*self\s*\)\s*->\s*&\s*\'static\s+str\s*\{\s*"([^"]*)"', src)
     info["name"] = m.group(1) if m else None
     if not m:
-        err(0, 'fn name(&self) -> &\'static str phải trả về một chuỗi viết thẳng, ví dụ "alpha_abc_trader"')
+        err(0, 'fn name(&self) -> &\'static str phải trả về một chuỗi viết thẳng, ví dụ "alpha_abc"')
     return errors, info
 
 
@@ -538,6 +538,20 @@ def compile_check(src, template_path=DEFAULT_TEMPLATE, rustc="rustc", timeout=12
         if r.returncode != 0 and not errors:
             errors.append(f"biên dịch thất bại (mã {r.returncode})")
         return r.returncode == 0, errors[:40]
+
+
+FN_NAME_RE = re.compile(r'(fn\s+name\s*\(\s*&\s*self\s*\)\s*->\s*&\s*\'static\s+str\s*\{\s*")([^"\\\n]*)(")')
+
+
+def set_fn_name(src, name):
+    """Platform tự đặt tên alpha: thay chuỗi trả về của MỌI fn name() bằng tên cuối (đã có hậu tố trader).
+    Trả về (mã mới, tên cũ đầu tiên hoặc None). Không có fn name() thì giữ nguyên để checker báo lỗi."""
+    if not NAME_RE.match(name):
+        raise ValueError("tên alpha không hợp lệ")
+    m = FN_NAME_RE.search(src)
+    if not m:
+        return src, None
+    return FN_NAME_RE.sub(lambda x: x.group(1) + name + x.group(3), src), m.group(2)
 
 
 def check(src, template_path=DEFAULT_TEMPLATE, do_compile=True):

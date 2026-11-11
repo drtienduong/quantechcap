@@ -5,7 +5,7 @@
   python qc_review.py approve ID [ghi chú]   kiểm tra lại (sha256 + tĩnh + biên dịch), cài vào thư mục alpha, báo web
   python qc_review.py reject ID lý do        từ chối, báo lý do cho trader trên web
 
-Bản nộp nằm ở <thư mục trader>/submissions/<ID 6 số>_<tên>/ (source.rs + meta.json). Không sửa source.rs bằng tay.
+Bản nộp nằm ở <thư mục trader>/submissions/<ID 6 số>_<tên>/ (source.rs + meta.json; source.named.rs = bản đã đặt fn name() theo tên cuối). Không sửa source.rs bằng tay.
 """
 import hashlib
 import json
@@ -75,7 +75,7 @@ def cmd_approve(sid, note):
     raw = (d / "source.rs").read_bytes()
     if hashlib.sha256(raw).hexdigest() != m["sha256"]:
         sys.exit("source.rs đã bị thay đổi so với lúc nộp (sha256 khác). Dừng.")
-    src = raw.decode("utf-8")
+    src, _ = D.AC.set_fn_name(raw.decode("utf-8"), m["name"])   # platform tự đặt fn name() = tên cuối
     res = D.AC.check(src, D.RUNNER_TEMPLATE)       # kiểm lại: engine/bộ luật có thể đã đổi từ lúc nộp
     if not res["static_ok"] or res["compile_ok"] is False:
         print("Kiểm tra lại KHÔNG đạt:")

@@ -6,7 +6,8 @@
 2. Đưa link trang cho AI của bạn (Claude, ChatGPT...) kèm ý tưởng giao dịch. Yêu cầu AI đọc toàn bộ trang, nhất là
    `AI_GUIDE.md`, và viết đúng theo đó. Chỉ cần MỘT file `.rs`. AI không đọc được web thì tải bản offline (.zip)
    trên cùng trang và đính kèm vào chat.
-3. Đặt tên file: `<tên_alpha>_<hậu tố của bạn>.rs` (hậu tố hiện trên trang nộp alpha). Chỉ chữ, số, dấu `_`.
+3. Đặt tên file tùy ý, ví dụ `alpha_ma_cross_m5.rs` (chỉ chữ, số, dấu `_`). KHÔNG cần thêm hậu tố: platform tự thêm
+   hậu tố cố định của tài khoản bạn vào tên alpha (ví dụ `alpha_ma_cross_m5_duong_tien`) và tự sửa `fn name()` trong mã.
 4. Nộp file trên web. Data-server kiểm tra tự động trong vài giây:
    - Lỗi quy tắc an toàn hoặc lỗi biên dịch: web hiện lỗi kèm số dòng. Đưa lỗi cho AI sửa rồi nộp lại.
    - Đạt: alpha vào hàng chờ duyệt (trừ khi bạn được cấp quyền tự duyệt).

@@ -119,7 +119,16 @@ const subTag = (s) => h("span", { class: "tag " + ({ approved: "done", rejected:
 async function pageSubmit(main) {
   const suffix = ST.alpha_suffix;
   const fileIn = h("input", { type: "file", accept: ".rs" });
-  const nameIn = h("input", { type: "text", size: 50, placeholder: "alpha_y_tuong" + suffix });
+  const nameIn = h("input", { type: "text", size: 40, placeholder: "alpha_y_tuong" });
+  // Trader gõ tên bất kỳ; platform tự thêm hậu tố cố định của tài khoản (cùng quy tắc với qc_common.full_alpha_name).
+  const fullName = (v) => {
+    let b = v.trim().replace(/\.rs$/i, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+    if (b.endsWith(suffix)) b = b.slice(0, -suffix.length).replace(/_+$/, "");
+    return b && b !== suffix.slice(1) ? b + suffix : "";
+  };
+  const preview = h("span", { class: "mono" });
+  const showPreview = () => { const f = fullName(nameIn.value); preview.textContent = f ? `Tên alpha sẽ là: ${f}` : ""; };
+  nameIn.addEventListener("input", showPreview);
   const info = h("div", {});
   const listBox = h("div", {});
   const detail = h("div", {});
@@ -130,24 +139,25 @@ async function pageSubmit(main) {
     if (!f) return;
     if (f.size > 200000) { info.append(h("p", { class: "err" }, "File quá lớn (tối đa 200 KB).")); srcText = null; return; }
     srcText = await f.text();
-    // Tên alpha: ưu tiên tên trong fn name() của file; không có thì lấy tên file, bỏ hậu tố trình duyệt thêm khi tải trùng
-    // (vd "x (1).rs", "x-1.rs") và đổi ký tự không hợp lệ thành "_". Luôn cập nhật khi chọn file mới.
-    const m = srcText.match(/fn\s+name\s*\(\s*&self\s*\)\s*->\s*&'static\s+str\s*\{\s*"([A-Za-z0-9_]{1,80})"/);
-    nameIn.value = m && m[1].endsWith(suffix) ? m[1]
-      : f.name.replace(/\.rs$/i, "").replace(/\s*\(\d+\)$/, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+    // Tên alpha gợi ý = tên file (bỏ ".rs", bỏ "(1)" trình duyệt thêm khi tải trùng, ký tự lạ -> "_", bỏ hậu tố trader
+    // nếu đã có vì platform tự thêm). Trader sửa tùy ý trong ô. Luôn cập nhật khi chọn file mới.
+    let base = f.name.replace(/\.rs$/i, "").replace(/\s*\(\d+\)$/, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+    if (base.endsWith(suffix)) base = base.slice(0, -suffix.length).replace(/_+$/, "");
+    nameIn.value = base;
+    showPreview();
     info.append(h("p", { class: "muted" }, `${f.name}: ${f.size} byte, ${srcText.split("\n").length} dòng`));
   });
   const btn = h("button", { class: "btn primary", on: { click: async () => {
     info.replaceChildren();
     if (!srcText) { info.append(h("p", { class: "err" }, "Chọn file .rs trước.")); return; }
-    const name = nameIn.value.trim();
-    if (!/^[A-Za-z0-9_]{1,80}$/.test(name) || !name.endsWith(suffix)) {
-      info.append(h("p", { class: "err" }, `Tên "${name}" không hợp lệ: chỉ chữ, số, dấu _ (tối đa 80 ký tự) và phải kết thúc bằng ${suffix}. Sửa ô "Tên alpha" rồi nộp lại.`)); return; }
+    const name = fullName(nameIn.value);
+    if (!name || name.length > 80) {
+      info.append(h("p", { class: "err" }, `Tên không hợp lệ: cần ít nhất một chữ hoặc số, cả hậu tố ${suffix} tối đa 80 ký tự. Sửa ô "Tên alpha" rồi nộp lại.`)); return; }
     btn.disabled = true;
     const j = await api("/api/submissions", { name, source: srcText });
     btn.disabled = false;
     if (!j.ok) { info.append(h("p", { class: "err" }, j.error || "Lỗi")); return; }
-    info.append(h("p", { class: "ok" }, `Đã nộp (#${j.id}). Data-server sẽ kiểm tra trong vài giây.`));
+    info.append(h("p", { class: "ok" }, `Đã nộp (#${j.id}) với tên ${j.name || name}. Data-server sẽ kiểm tra trong vài giây.`));
     fileIn.value = ""; srcText = null;
     await load(); showDetail(j.id);
   } } }, "Nộp alpha");
@@ -182,8 +192,10 @@ async function pageSubmit(main) {
   main.replaceChildren(
     h("h2", {}, "Nộp alpha"),
     h("div", { class: "card" }, h("h3", {}, "Nộp mã nguồn (.rs)"),
-      h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, `Tên alpha (kết thúc bằng ${suffix})`, h("br"), nameIn), btn),
+      h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, "Tên alpha", h("br"), nameIn, h("span", { class: "mono muted sfx" }, suffix)), btn),
+      h("p", { class: "muted" }, preview),
       info,
+      h("p", { class: "muted" }, `Đặt tên tùy ý. Platform tự thêm hậu tố ${suffix} của tài khoản bạn vào tên và vào fn name() trong mã, không cần sửa file.`),
       h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về."),
       h("p", { class: "muted" }, "Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Bộ khung alpha cho AI"), ".")),
     detail,

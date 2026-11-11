@@ -729,9 +729,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.fail(400, "JSON không hợp lệ")
         name, src = body.get("name"), body.get("source")
-        suffix = alpha_suffix(slug)
-        if not isinstance(name, str) or not C.NAME_RE.match(name) or not name.endswith(suffix) or name == suffix[1:]:
-            return self.fail(400, f"tên alpha phải dạng <tên>{suffix} (chỉ chữ, số, _ ; tối đa 80 ký tự)")
+        # Trader gõ tên bất kỳ; platform tự thêm hậu tố cố định của tài khoản (desk tự kiểm lại và sửa fn name()).
+        name, name_err = C.full_alpha_name(name, alpha_suffix(slug))
+        if name_err:
+            return self.fail(400, name_err)
         if not isinstance(src, str) or not src.strip():
             return self.fail(400, "thiếu mã nguồn")
         raw = src.encode("utf-8")
@@ -750,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
                           (uid, name, src, hashlib.sha256(raw).hexdigest(), len(raw), "queued", "Chờ data-server kiểm tra",
                            now_iso(), now_iso()))
         con.commit()
-        self.send_json({"ok": True, "id": cur.lastrowid})
+        self.send_json({"ok": True, "id": cur.lastrowid, "name": name})
 
     def job_api(self, con, uid, jid, rest, method, q):
         j = con.execute("select * from jobs where id=? and user_id=?", (jid, uid)).fetchone()
