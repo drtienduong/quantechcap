@@ -75,7 +75,7 @@ Cloudflare: một bản ghi A `research.quantechcap.com` trỏ về VPS (không 
 - IS: từ đầu dữ liệu đến 2024-01-01. OS1: 2024 đến 2026. OS2: từ 2026-01-01, holdout mù chỉ Dương dùng.
 - Trader không được thấy OS1 của mọi biến thể (tránh chọn tham số theo OS1, tức overfit). Web chỉ đăng bản IS-only.
 - OS2 không bao giờ lên web.
-- Tên alpha có đuôi `_<tên trader>` (ví dụ `alpha_breakout_day_duong_nguyen`). Desk chỉ liệt kê alpha khớp đuôi này.
+- Tên alpha có đuôi `_<tên trader>` (ví dụ `alpha_breakout_day_duong_nguyen`). Desk chỉ liệt kê alpha khớp đuôi này. Từ 2026-11-11 trader nộp với tên tùy ý: platform tự thêm đuôi cố định của tài khoản (không thêm lần nữa nếu đã có) và desk tự đặt `fn name()` theo tên cuối.
 
 ---
 
