@@ -119,16 +119,13 @@ const subTag = (s) => h("span", { class: "tag " + ({ approved: "done", rejected:
 async function pageSubmit(main) {
   const suffix = ST.alpha_suffix;
   const fileIn = h("input", { type: "file", accept: ".rs" });
-  const nameIn = h("input", { type: "text", size: 40, placeholder: "alpha_y_tuong" });
-  // Trader gõ tên bất kỳ; platform tự thêm hậu tố cố định của tài khoản (cùng quy tắc với qc_common.full_alpha_name).
+  // Tên alpha = tên file (platform tự thêm hậu tố cố định của tài khoản; cùng quy tắc với qc_common.full_alpha_name).
   const fullName = (v) => {
-    let b = v.trim().replace(/\.rs$/i, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+    let b = v.trim().replace(/\.rs$/i, "").replace(/\s*\(\d+\)$/, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
     if (b.endsWith(suffix)) b = b.slice(0, -suffix.length).replace(/_+$/, "");
     return b && b !== suffix.slice(1) ? b + suffix : "";
   };
-  const preview = h("span", { class: "mono" });
-  const showPreview = () => { const f = fullName(nameIn.value); preview.textContent = f ? `Tên alpha sẽ là: ${f}` : ""; };
-  nameIn.addEventListener("input", showPreview);
+  let fileName = "";
   const info = h("div", {});
   const listBox = h("div", {});
   const detail = h("div", {});
@@ -139,20 +136,17 @@ async function pageSubmit(main) {
     if (!f) return;
     if (f.size > 200000) { info.append(h("p", { class: "err" }, "File quá lớn (tối đa 200 KB).")); srcText = null; return; }
     srcText = await f.text();
-    // Tên alpha gợi ý = tên file (bỏ ".rs", bỏ "(1)" trình duyệt thêm khi tải trùng, ký tự lạ -> "_", bỏ hậu tố trader
-    // nếu đã có vì platform tự thêm). Trader sửa tùy ý trong ô. Luôn cập nhật khi chọn file mới.
-    let base = f.name.replace(/\.rs$/i, "").replace(/\s*\(\d+\)$/, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
-    if (base.endsWith(suffix)) base = base.slice(0, -suffix.length).replace(/_+$/, "");
-    nameIn.value = base;
-    showPreview();
-    info.append(h("p", { class: "muted" }, `${f.name}: ${f.size} byte, ${srcText.split("\n").length} dòng`));
+    fileName = f.name;
+    const fn = fullName(f.name);
+    info.append(h("p", { class: "muted" }, `${f.name}: ${f.size} byte, ${srcText.split("\n").length} dòng`,
+      fn ? ` · tên alpha: ${fn}` : ""));
   });
   const btn = h("button", { class: "btn primary", on: { click: async () => {
     info.replaceChildren();
     if (!srcText) { info.append(h("p", { class: "err" }, "Chọn file .rs trước.")); return; }
-    const name = fullName(nameIn.value);
+    const name = fullName(fileName);
     if (!name || name.length > 80) {
-      info.append(h("p", { class: "err" }, `Tên không hợp lệ: cần ít nhất một chữ hoặc số, cả hậu tố ${suffix} tối đa 80 ký tự. Sửa ô "Tên alpha" rồi nộp lại.`)); return; }
+      info.append(h("p", { class: "err" }, `Tên file không hợp lệ: cần ít nhất một chữ hoặc số, tên alpha (gồm hậu tố ${suffix}) tối đa 80 ký tự. Đổi tên file rồi chọn lại.`)); return; }
     btn.disabled = true;
     const j = await api("/api/submissions", { name, source: srcText });
     btn.disabled = false;
@@ -192,12 +186,10 @@ async function pageSubmit(main) {
   main.replaceChildren(
     h("h2", {}, "Nộp alpha"),
     h("div", { class: "card" }, h("h3", {}, "Nộp mã nguồn (.rs)"),
-      h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), h("label", {}, "Tên alpha", h("br"), nameIn, h("span", { class: "mono muted sfx" }, suffix)), btn),
-      h("p", { class: "muted" }, preview),
+      h("div", { class: "row" }, h("label", {}, "File .rs", h("br"), fileIn), btn),
       info,
-      h("p", { class: "muted" }, `Đặt tên tùy ý. Platform tự thêm hậu tố ${suffix} của tài khoản bạn vào tên và vào fn name() trong mã, không cần sửa file.`),
-      h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Web chỉ giữ mã tạm thời đến khi data-server nhận về."),
-      h("p", { class: "muted" }, "Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Bộ khung alpha cho AI"), ".")),
+      h("p", { class: "muted" }, "Nộp lại cùng tên = phiên bản mới. Viết alpha theo ",
+        h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Bộ khung alpha cho AI"), ".")),
     detail,
     h("div", { class: "card" }, h("h3", {}, "Các lần nộp"), listBox));
   let pending = await load();
@@ -216,14 +208,13 @@ async function pageRun(main, name) {
   const lim = ST.limits;
   const isEnd = ST.todate_max || lim.is_end;
   const f = {
-    type: h("select", {}, h("option", { value: "optimize_is" }, "Optimize trên IS"), h("option", { value: "smoke" }, "Smoke test (nhanh, giới hạn tick)")),
-    mode: h("select", {}, h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)"), h("option", { value: "independent" }, "Từng symbol riêng")),
+    mode: h("select", {}, h("option", { value: "independent" }, "Từng symbol riêng"), h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)")),
     period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === ((a.meta && a.meta.required_period) || "H1") }, p))),
     from: h("input", { type: "text", value: "2010.01.01", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
     deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:1000", size: 7, title: "Tối đa 1:1000. Margin call 100%, stop-out 50%." }),
     swap: h("select", {}, h("option", { value: "zero" }, "zero (không swap)"), h("option", { value: "synthetic" }, "synthetic")),
     lot: h("input", { type: "number", value: 0.01, step: "any" }), pv: h("input", { type: "number", value: 100000 }),
-    comm: h("input", { type: "number", value: 0, step: "any" }), ticks: h("input", { type: "number", value: 200000 }),
+    comm: h("input", { type: "number", value: 0, step: "any" }),
   };
   const SYM = Object.fromEntries(ST.symbols.map((x) => [x.symbol, x]));
   const boxes = ST.symbols.map((x) => h("input", { type: "checkbox", value: x.symbol, checked: x.symbol === "EURUSD" }));
@@ -267,7 +258,6 @@ async function pageRun(main, name) {
   f.period.addEventListener("change", checkPeriod);
   const cnt = h("b", {});
   const msg = h("div", {});
-  const ticksWrap = h("label", {}, "Giới hạn tick (smoke)", h("br"), f.ticks);
 
   function countVariants() {
     let t = 1;
@@ -281,26 +271,20 @@ async function pageRun(main, name) {
   }
   function refresh() {
     const t = countVariants();
-    const cap = f.type.value === "smoke" ? lim.max_variants_smoke : lim.max_variants;
     cnt.textContent = Number.isNaN(t) ? "không hợp lệ" : String(t);
-    cnt.className = (Number.isNaN(t) || t > cap) ? "err" : "";
-    ticksWrap.style.display = f.type.value === "smoke" ? "" : "none";
+    cnt.className = (Number.isNaN(t) || t > lim.max_variants) ? "err" : "";
   }
-  [f.type, ...pRows.flatMap((p) => [p.a, p.s, p.b])].forEach((e) => e.addEventListener("input", refresh));
-  f.type.addEventListener("change", () => {
-    if (f.type.value === "smoke") { f.from.value = "2023.10.01"; f.to.value = isEnd; setSyms(["EURUSD"]); }
-    refresh();
-  });
+  pRows.flatMap((p) => [p.a, p.s, p.b]).forEach((e) => e.addEventListener("input", refresh));
 
   const submit = h("button", { class: "btn primary", on: { click: async () => {
     msg.replaceChildren();
     const params = {};
     for (const p of pRows) params[p.k] = [parseFloat(p.a.value), parseFloat(p.s.value), parseFloat(p.b.value)];
     const cfg = {
-      type: f.type.value, alpha: name, symbols_mode: f.mode.value, symbols: boxes.filter((b) => b.checked).map((b) => b.value),
+      type: "optimize_is", alpha: name, symbols_mode: f.mode.value, symbols: boxes.filter((b) => b.checked).map((b) => b.value),
       period: f.period.value, fromdate: f.from.value.trim(), todate: f.to.value.trim(), deposit: parseFloat(f.deposit.value),
       leverage: f.leverage.value.trim(), swap_mode: f.swap.value, lot: parseFloat(f.lot.value), point_value_per_lot: parseFloat(f.pv.value),
-      commission_per_trade: parseFloat(f.comm.value), max_ticks: f.type.value === "smoke" ? parseInt(f.ticks.value, 10) || 0 : 0, params,
+      commission_per_trade: parseFloat(f.comm.value), max_ticks: 0, params,
     };
     if (!checkPeriod() && !confirm(`Alpha yêu cầu khung ${reqP} nhưng bạn chọn ${f.period.value}. Vẫn chạy?`)) return;
     submit.disabled = true;
@@ -313,29 +297,22 @@ async function pageRun(main, name) {
   main.replaceChildren(
     h("h2", {}, "Chạy: ", h("span", { class: "mono" }, name)),
     h("div", { class: "card" }, h("div", { class: "row" },
-      h("label", {}, "Loại job", h("br"), f.type), h("label", {}, "Khung thời gian" + (reqP ? ` (alpha yêu cầu ${reqP})` : ""), h("br"), f.period),
-      h("label", { title: "Gõ 0 để lấy ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn" }, "Ngày bắt đầu (0 = sớm nhất)", h("br"), f.from, fromHint), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to), ticksWrap),
-      periodWarn,
-      h("p", { class: "muted" }, ST.os1_access ? "Tài khoản của bạn được chạy đến " + isEnd + " (IS + OS1). OS2 không chạy qua web. "
-        : "Tài khoản của bạn chạy IS đến " + isEnd + ". Biến thể pass IS được nộp chạy OS1 ở trang Alpha pass IS. ", "Smoke: tối đa ",
-        lim.smoke_max_days, " ngày, ", lim.smoke_max_symbols, " symbol, được ưu tiên chạy trước các job optimize đang chờ.")),
+      h("label", {}, "Khung thời gian" + (reqP ? ` (alpha yêu cầu ${reqP})` : ""), h("br"), f.period),
+      h("label", { title: "Gõ 0 để lấy ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn" }, "Ngày bắt đầu (0 = sớm nhất)", h("br"), f.from, fromHint), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to)),
+      periodWarn),
     h("div", { class: "card" }, h("h3", {}, "Symbol"), h("div", { class: "row" }, h("label", {}, "Chế độ", h("br"), f.mode),
-      h("button", { class: "btn", on: { click: () => setSyms(["EURUSD"]) } }, "Chỉ EURUSD"),
       h("button", { class: "btn", on: { click: () => setSyms(ST.fx25.slice(0, 20)) } }, "20 cặp"),
       h("button", { class: "btn", on: { click: () => setSyms(ST.fx25) } }, "25 cặp FX"),
       ST.groups.filter((g) => g !== "FX").map((g) => h("button", { class: "btn", on: { click: () => addSyms(groupSyms(g)) } }, "+ " + g)),
       h("button", { class: "btn", on: { click: () => setSyms([]) } }, "Bỏ hết")),
-      h("div", { class: "symbox" }, symGroups),
-      h("p", { class: "muted" }, "Point value/lot tự đặt theo symbol: FX 100000 (ô bên dưới), XAUUSD 100, XAGUSD 5000, đồng 25000 lb, dầu 1000, cacao 10 tấn, đường 50 tấn, cà phê 37500 lb, bông 50000 lb, nước cam 15000 lb (3 loại cuối báo giá bằng cent, engine tự quy đổi), chỉ số 1 (HKGIDXHKD 100), crypto 1. ",
-        "Swap synthetic chỉ có cho FX và XAUUSD. Dữ liệu *_BN (Binance) là tick tổng hợp từ nến 1 phút. Rê chuột lên symbol để xem ngày bắt đầu dữ liệu."),
-      h("p", { class: "warn" }, "Lưu ý: alpha dùng thông tin tài khoản (…_with_account) chỉ giao dịch ở chế độ Portfolio; chế độ \"Từng symbol riêng\" có thể ra 0 lệnh.")),
+      h("div", { class: "symbox" }, symGroups)),
     h("div", { class: "card" }, h("h3", {}, "Tài khoản"), h("div", { class: "row" },
       h("label", {}, "Deposit", h("br"), f.deposit), h("label", {}, "Leverage", h("br"), f.leverage), h("label", {}, "Swap", h("br"), f.swap),
       h("label", {}, "Lot", h("br"), f.lot), h("label", {}, "Point value/lot (FX)", h("br"), f.pv), h("label", {}, "Commission/lot/deal", h("br"), f.comm))),
     h("div", { class: "card" }, h("h3", {}, "Tham số (start, step, stop; step = 0 là một giá trị)"),
       h("table", {}, h("tr", {}, h("th", {}, "Tham số"), h("th", {}, "Start"), h("th", {}, "Step"), h("th", {}, "Stop")),
         pRows.map((p) => h("tr", {}, h("td", { class: "mono" }, p.k), h("td", {}, p.a), h("td", {}, p.s), h("td", {}, p.b)))),
-      h("p", {}, "Số biến thể: ", cnt, " (tối đa ", lim.max_variants, "; smoke ", lim.max_variants_smoke, ")")),
+      h("p", {}, "Số biến thể: ", cnt, " (tối đa ", lim.max_variants, ")")),
     submit, msg);
   refresh();
 }

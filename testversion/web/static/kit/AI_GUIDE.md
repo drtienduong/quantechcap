@@ -169,4 +169,4 @@ but simpler: choose different names (e.g. `MyPos`, `TradeSide`).
 1. The file follows sections 1 to 6. If the logic depends on one timeframe, `REQUIRED_PERIOD` is declared.
 2. Optional: run `local_check.rs` (needs Rust installed) to catch type errors.
 3. Upload on the website. The page shows checker errors with line numbers and compile errors from your file only.
-   Fix and upload again. After approval, run a Smoke test first (short period, 1 symbol), then Optimize IS.
+   Fix and upload again. After approval, run Optimize IS (for a quick first check: 1 symbol, a short date range, step = 0).

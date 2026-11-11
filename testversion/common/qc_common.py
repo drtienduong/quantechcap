@@ -52,13 +52,16 @@ SYMBOLS.update({
     "OJUICECMDUSX": ("Nông sản", 15000.0, "2017.10.23", False),   # 15.000 lb, giá cent/lb
     "SUGARCMDUSD": ("Nông sản", 50.0, "2017.10.03", False),       # 50 tấn, giá USD/tấn
 })
-GROUPS = ["FX", "Kim loại", "Năng lượng", "Nông sản", "Chỉ số", "Crypto"]
-SYMBOL_ORDER = list(FX25) + [s for g in GROUPS for s in SYMBOLS if SYMBOLS[s][0] == g and s not in FX25]
+_SUBGROUPS = ["FX", "Kim loại", "Năng lượng", "Nông sản", "Chỉ số", "Crypto"]   # thứ tự chuẩn của symbol trong job
+SYMBOL_ORDER = list(FX25) + [s for g in _SUBGROUPS for s in SYMBOLS if SYMBOLS[s][0] == g and s not in FX25]
+# Nhóm hiển thị trên web (2026-11-11, Dương): gộp kim loại, năng lượng, nông sản thành Commodity
+GROUP_OF = {"Kim loại": "Commodity", "Năng lượng": "Commodity", "Nông sản": "Commodity"}
+GROUPS = ["FX", "Commodity", "Chỉ số", "Crypto"]
 
 
 def symbols_info():
     """Cho giao diện: danh sách symbol theo thứ tự hiển thị."""
-    return [{"symbol": s, "group": SYMBOLS[s][0], "point_value": SYMBOLS[s][1], "start": SYMBOLS[s][2], "swap": SYMBOLS[s][3]}
+    return [{"symbol": s, "group": GROUP_OF.get(SYMBOLS[s][0], SYMBOLS[s][0]), "point_value": SYMBOLS[s][1], "start": SYMBOLS[s][2], "swap": SYMBOLS[s][3]}
             for s in SYMBOL_ORDER]
 JOB_TYPES = ["optimize_is", "smoke"]          # trader tạo trực tiếp qua form
 OS1_TYPE = "os1"                               # chỉ tạo qua trang "Alpha pass IS" (1 biến thể đã pass IS)

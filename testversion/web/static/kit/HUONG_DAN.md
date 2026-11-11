@@ -11,7 +11,7 @@
 4. Nộp file trên web. Data-server kiểm tra tự động trong vài giây:
    - Lỗi quy tắc an toàn hoặc lỗi biên dịch: web hiện lỗi kèm số dòng. Đưa lỗi cho AI sửa rồi nộp lại.
    - Đạt: alpha vào hàng chờ duyệt (trừ khi bạn được cấp quyền tự duyệt).
-5. Duyệt xong, alpha xuất hiện ở trang "Alpha". Chạy Smoke test trước (khoảng ngắn, 1 symbol), rồi mới Optimize IS.
+5. Duyệt xong, alpha xuất hiện ở trang "Alpha". Chạy Optimize IS; muốn thử nhanh thì để 1 symbol, khoảng ngày ngắn và step = 0 (một biến thể).
 6. Biến thể pass tiêu chí IS (Sharpe IS > 1, Sharpe 3 năm gần nhất > 0.5, giữ lệnh 1-70%, fitness > 1, không stop-out)
    hiện ở trang "Alpha pass IS". Chọn biến thể rồi nộp chạy OS1 (2024-2026); mỗi biến thể chỉ chạy OS1 một lần, đúng bản
    alpha và cấu hình đã pass IS. Kết quả ở trang "Lịch sử OS1". Tiêu chí OS1: có đỉnh balance mới, DD OS1 không vượt DD lớn

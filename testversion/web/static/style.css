@@ -126,4 +126,3 @@ textarea.askbox{width:100%;font:inherit;padding:8px;border:1px solid var(--line)
 .vwparams{margin-top:10px;border-top:1px solid #d9dee5;padding-top:8px}
 .vwprange{display:grid;grid-template-columns:minmax(80px,1fr) 2fr;gap:6px;align-items:center;margin:5px 0;font-size:12px}
 .vwprange>div{display:flex;gap:4px}.vwprange input{width:50%;min-width:0;padding:5px}
-.sfx { margin-left: 4px; }
