@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -57,6 +58,8 @@ IMPORTS = [{"root": Path(x["root"]).resolve(), "slug": x["slug"], "source": x.ge
            for x in CFG.get("imports", [])]
 IMPORT_EVERY_SEC = int(CFG.get("import_every_sec", 600))     # job OS1 đang/đã chạy: nguồn IS, tham số, cờ crypto
 OS1_LEDGER = Path(CFG.get("os1_ledger") or r"D:\quantechcap-data-research\os1_ledger.csv")
+TRASH_DAYS = float(CFG.get("trash_days", 30))   # report bị xóa nằm trong <trader>/trash bấy nhiêu ngày rồi mới xóa hẳn
+TRASH_CHECK_SEC = float(CFG.get("trash_check_sec", 6 * 3600))
 
 heavy_busy = threading.Event()   # đang chạy optimize (hàng nặng)
 smoke_busy = threading.Event()   # đang chạy smoke (hàng nhanh, chạy song song với hàng nặng)
@@ -132,8 +135,9 @@ def sync_catalog(force=False):
         meta = _meta.get(slug, {})
         h = hashlib.sha1(json.dumps([cat, meta], sort_keys=True).encode()).hexdigest()
         if force or _cat_hash.get(slug) != h:
-            api("POST", "/api/desk/alphas", {"slug": slug, "alphas": [{"name": n, "params": p, "meta": meta.get(n, {})}
-                                                                       for n, p in cat.items()]})
+            api("POST", "/api/desk/alphas", {"slug": slug, "os1_access": TRADERS[slug]["os1_access"],
+                                             "auto_approve": TRADERS[slug]["auto_approve"],
+                                             "alphas": [{"name": n, "params": p, "meta": meta.get(n, {})} for n, p in cat.items()]})
             _cat_hash[slug] = h
             log(f"đồng bộ {len(cat)} alpha cho {slug}")
 
@@ -334,6 +338,9 @@ def import_one(imp, run_dir, key, sig, idx):
         idx[key] = {"jid": None, "sig": sig, "rejected": r.get("error")}
         return
     jid = r["job_id"]
+    if r.get("deleted"):          # report đã bị xóa (ẩn) trên web: không gửi lại, file offline giữ nguyên
+        idx[key] = {"jid": jid, "sig": sig, "deleted": True}
+        return
     for i in range(0, len(variants), 400):
         api("POST", f"/api/desk/jobs/{jid}/result", {"variants": variants[i:i + 400], "final": i + 400 >= len(variants),
                                                      "summary": summary}, timeout=120)
@@ -1076,14 +1083,155 @@ def handle_submission(sb):
 
 
 # ---------- yêu cầu dữ liệu theo trang ----------
+_trash_lock = threading.Lock()
+
+
+def dir_bytes(p: Path):
+    n = 0
+    for dp, _dn, fn in os.walk(p):
+        for f in fn:
+            try:
+                n += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return n
+
+
+def report_of(t, jid):
+    """Thư mục report của job web: chỉ mục job (job xong) hoặc file trạng thái rq_run (job lỗi/hủy giữa chừng)."""
+    e = jobs_index().get(str(jid))
+    if e and e.get("kind") != "offline":
+        return Path(e["run_dir"]), e
+    found = find_run_status(t, jid)
+    if found and found[1].get("report"):
+        return Path(found[1]["report"]), None
+    return None, e
+
+
+def run_alive_in(run_dir: Path):
+    for t in TRADERS.values():
+        for p in (t["dir"] / "lab" / "runs").glob("*.json"):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if d.get("state") == "running" and d.get("report") and Path(d["report"]).resolve() == run_dir \
+                    and pid_alive(int(d.get("pid") or -1)):
+                return True
+    return False
+
+
+def handle_trash(slug, jid, kind):
+    """kind='trash': chuyển report vào <trader>/trash/<thời điểm>_job<id>_<tên>; 'restore': chuyển về chỗ cũ."""
+    t = TRADERS.get(slug)
+    if not t:
+        return {"ok": False, "error": "trader không có trên data-server"}
+    report_root = (t["dir"] / "report").resolve()
+    trash_root = (t["dir"] / "trash").resolve()
+    with _trash_lock:
+        idx = jobs_index()
+        entry = idx.get(str(jid))
+        if entry and entry.get("kind") == "offline":
+            return {"ok": True, "note": "report offline: chỉ ẩn trên web, không đụng file"}
+        if entry and entry.get("slug") != slug:
+            return {"ok": False, "error": "job không thuộc trader này"}
+        if kind == "restore":
+            td = Path(entry["trash_dir"]).resolve() if entry and entry.get("trash_dir") else None
+            if not td or trash_root not in td.parents or not td.is_dir():
+                return {"ok": True, "note": "không có report trong thùng rác (có thể đã dọn sau 30 ngày)"}
+            orig = Path(entry["run_dir"]).resolve()
+            if report_root not in orig.parents or orig.exists():
+                return {"ok": False, "error": "không chuyển về được: chỗ cũ không hợp lệ hoặc đã có thư mục khác"}
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(td), str(orig))
+            entry.pop("trash_dir", None)
+            entry.pop("trashed_at", None)
+            JOBS_FILE.write_text(json.dumps(idx, indent=1), encoding="utf-8")
+            log(f"khôi phục report job {jid} ({slug})")
+            return {"ok": True, "note": "đã chuyển report về chỗ cũ"}
+        if entry and entry.get("trash_dir"):
+            return {"ok": True, "note": "report đã ở trong thùng rác"}
+        run_dir, _ = report_of(t, jid)
+        if not run_dir:
+            return {"ok": True, "note": "job không có report trên data-server"}
+        run_dir = run_dir.resolve()
+        if report_root not in run_dir.parents or not run_dir.name.startswith("ver_"):
+            return {"ok": False, "error": "report nằm ngoài thư mục report của trader, không xóa"}
+        if not run_dir.is_dir():
+            return {"ok": True, "note": "report không còn trên data-server"}
+        if run_alive_in(run_dir):
+            return {"ok": False, "error": "report đang được một run sử dụng"}
+        size = dir_bytes(run_dir)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        dest = trash_root / f"{stamp}_job{int(jid)}_{run_dir.parent.name}_{run_dir.name}"
+        trash_root.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(run_dir), str(dest))
+        (dest / "_trash.json").write_text(json.dumps({"job_id": jid, "slug": slug, "orig": str(run_dir), "trashed_at": time.time(),
+                                                      "bytes": size}, indent=1), encoding="utf-8")
+        e = idx.setdefault(str(jid), {"slug": slug, "run_dir": str(run_dir)})
+        e.update(trash_dir=str(dest), trashed_at=time.time())
+        JOBS_FILE.write_text(json.dumps(idx, indent=1), encoding="utf-8")
+        try:                                       # thư mục alpha trong report rỗng thì dọn luôn
+            run_dir.parent.rmdir()
+        except OSError:
+            pass
+        log(f"xóa report job {jid} ({slug}): vào thùng rác, {size / 1e6:.1f} MB")
+        return {"ok": True, "bytes": size, "note": f"đã chuyển vào thùng rác ({size / 1e6:.1f} MB), tự xóa hẳn sau {TRASH_DAYS:g} ngày"}
+
+
+def purge_trash():
+    """Xóa hẳn report trong thùng rác quá TRASH_DAYS ngày (chỉ trong <trader>/trash)."""
+    cutoff = time.time() - TRASH_DAYS * 86400
+    for slug, t in TRADERS.items():
+        root = (t["dir"] / "trash").resolve()
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            try:
+                info = json.loads((d / "_trash.json").read_text(encoding="utf-8"))
+                if d.is_dir() and root in d.resolve().parents and float(info.get("trashed_at", time.time())) < cutoff:
+                    with _trash_lock:
+                        shutil.rmtree(d)
+                        idx = jobs_index()
+                        e = idx.get(str(info.get("job_id")))
+                        if e and e.get("trash_dir") and Path(e["trash_dir"]).resolve() == d.resolve():
+                            e["purged"] = True
+                            e.pop("trash_dir", None)
+                            JOBS_FILE.write_text(json.dumps(idx, indent=1), encoding="utf-8")
+                    log(f"dọn thùng rác: {slug} {d.name}")
+            except Exception as e:  # noqa: BLE001
+                log(f"dọn thùng rác {d} lỗi: {e!r}")
+
+
+def trash_loop():
+    time.sleep(min(60, TRASH_CHECK_SEC))
+    while True:
+        try:
+            purge_trash()
+        except Exception as e:  # noqa: BLE001
+            log("dọn thùng rác lỗi:", repr(e))
+        time.sleep(TRASH_CHECK_SEC)
+
+
 def handle_request(req):
     rid, slug, kind, jid, pl = req["id"], req["slug"], req["kind"], req["job_id"], req["payload"]
+    if kind in ("trash", "restore"):
+        try:
+            res = handle_trash(slug, jid, kind)
+        except Exception as e:  # noqa: BLE001
+            log(f"{kind} job {jid} lỗi: {e!r}")
+            res = {"ok": False, "error": "lỗi phía data-server: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:200]}
+        try:
+            api("POST", f"/api/desk/requests/{rid}/result", res, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            log("gửi kết quả xóa report lỗi", repr(e))
+        return
     try:
         entry = jobs_index().get(str(jid))
         t = TRADERS.get(slug)
         if not entry or not t or entry["slug"] != slug:
             raise ValueError("không có kết quả của job này trên data-server")
-        run_dir = Path(entry["run_dir"]).resolve()
+        run_dir = Path(entry.get("trash_dir") or entry["run_dir"]).resolve()
         roots = [t["dir"]] + ([x["root"] for x in IMPORTS if x["slug"] == slug] if entry.get("kind") == "offline" else [])
         if not any(r == run_dir or r in run_dir.parents for r in roots):
             raise ValueError("đường dẫn không hợp lệ")
@@ -1169,6 +1317,7 @@ def handle_request(req):
 def main():
     log(f"desk chạy; web={WEB}; trader={list(TRADERS)}; data={DATA_FOLDER}")
     threading.Thread(target=catalog_loop, daemon=True).start()
+    threading.Thread(target=trash_loop, daemon=True).start()
     if IMPORTS:
         threading.Thread(target=import_loop, daemon=True).start()
     recover_jobs()

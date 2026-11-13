@@ -70,7 +70,9 @@ function QC_APP() {
   }
   function setNav() {
     const cur = location.hash || "#/";
-    nav.replaceChildren(...[["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"], ["#/ispass", "Alpha pass IS"], ["#/os1", "Lịch sử OS1"], ["#/ask", "Hỏi AI"]].map(([href, label]) =>
+    const items = [["#/", "Alpha"], ["#/submit", "Nộp alpha"], ["#/jobs", "Lịch sử chạy"], ["#/ispass", "Alpha pass IS"], ["#/os1", "Lịch sử OS1"], ["#/ask", "Hỏi AI"]];
+    if (ST && ST.is_admin) items.push(["#/admin", "Quản trị"]);
+    nav.replaceChildren(...items.map(([href, label]) =>
       h("a", { href, class: (cur === href || cur.startsWith(href + "/") || (href === "#/jobs" && cur.startsWith("#/job/"))) ? "active" : "" }, label)),
       h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "Hướng dẫn AI"));
     // điện thoại: menu cuộn ngang -> kéo mục đang mở vào giữa tầm nhìn
@@ -91,6 +93,7 @@ function QC_APP() {
       else if (hash === "#/ask" || hash.startsWith("#/ask?")) await pageAsk(main, new URLSearchParams(hash.split("?")[1] || ""));
       else if (hash === "#/ispass" || hash.startsWith("#/ispass/")) await pageIsPass(main, parseInt(hash.slice(9), 10) || 1);
       else if (hash === "#/os1" || hash.startsWith("#/os1/")) await pageOs1(main, parseInt(hash.slice(6), 10) || 1);
+      else if (hash === "#/admin" || hash.startsWith("#/admin/")) await pageAdmin(main, hash.slice(8) || "users");
       else await pageAlphas(main);
     } catch (e) { if (String(e) !== "Error: 401") main.replaceChildren(h("p", { class: "err" }, "Lỗi: " + e)); }
   }
@@ -345,6 +348,19 @@ async function pageJobs(main, page) {
   }
   const srcSel = sessionStorage.getItem("qc_jobsrc") || "";
   const srcBar = h("div", { class: "pager" });
+  const selected = new Set();
+  const delMsg = h("span", { class: "muted small" });
+  const delBtn = h("button", { class: "btn danger", disabled: true, on: { click: async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!confirm(confirmDeleteText(ids.length))) return;
+    delBtn.disabled = true;
+    const r = await api("/api/jobs/delete", { ids });
+    const bad = (r.results || []).filter((x) => !x.ok);
+    delMsg.textContent = r.ok ? `Đã xóa ${(r.results || []).length - bad.length} job.` + (bad.length ? " Không xóa được: " + bad.map((x) => `#${x.id} (${x.reason})`).join(", ") : "") : (r.error || "Lỗi");
+    selected.clear(); last = ""; await load();
+  } } }, "Xóa đã chọn");
+  const syncDel = () => { delBtn.disabled = !selected.size; delBtn.textContent = selected.size ? `Xóa đã chọn (${selected.size})` : "Xóa đã chọn"; };
   async function load() {
     const r = await api(`/api/jobs?limit=${JOBS_PER_PAGE}&offset=${(page - 1) * JOBS_PER_PAGE}` + (srcSel ? "&src=" + srcSel : ""));
     srcBar.replaceChildren(...(r.offline_total ? [["", "Tất cả"], ["web", "Chạy trên web"], ["offline", `Report offline (${r.offline_total})`]].map(([v, l]) =>
@@ -355,10 +371,19 @@ async function pageJobs(main, page) {
     const key = JSON.stringify(r);
     if (key === last) return;           // không đổi thì không vẽ lại (tránh nháy, giữ thao tác của người dùng)
     last = key;
-    box.replaceChildren(...(r.jobs.length ? [srcBar, pagerEl(pages, r.total), h("table", {},
-      h("tr", {}, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
+    const canDel = !!r.can_delete;
+    for (const id of [...selected]) if (!r.jobs.some((j) => j.id === id && j.deletable)) selected.delete(id);
+    syncDel();
+    const cb = (j) => !canDel ? null : h("td", { on: { click: (ev) => ev.stopPropagation() } }, j.deletable
+      ? h("input", { type: "checkbox", checked: selected.has(j.id), title: "Chọn để xóa", on: { change: (ev) => { if (ev.target.checked) selected.add(j.id); else selected.delete(j.id); syncDel(); } } })
+      : h("span", { class: "muted small", title: j.type === "os1" ? "Job OS1 được giữ lại" : "Không xóa được (đang chạy, hoặc có biến thể đã chạy OS1)" }, "–"));
+    const allBox = canDel ? h("th", {}, h("input", { type: "checkbox", title: "Chọn mọi job xóa được trên trang", on: { change: (ev) => {
+      r.jobs.filter((j) => j.deletable).forEach((j) => { if (ev.target.checked) selected.add(j.id); else selected.delete(j.id); });
+      last = ""; load(); } } })) : null;
+    box.replaceChildren(...(r.jobs.length ? [srcBar, canDel ? h("div", { class: "pager" }, delBtn, delMsg) : null, pagerEl(pages, r.total), h("table", {},
+      h("tr", {}, allBox, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
       r.jobs.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
-        h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"), h("td", {}, tag(j.status)),
+        cb(j), h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"), h("td", {}, tag(j.status)),
         h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")),
         h("td", { class: j.status === "failed" ? "err small" : (j.notice ? "warn small" : "muted small") }, j.notice || (j.status === "done" ? "" : j.message || "")),
         h("td", { class: "muted" }, j.created)))),
@@ -373,6 +398,153 @@ async function pageJobs(main, page) {
 function engineText(e) {
   if (!e) return "engine cũ (chưa ghi phiên bản)";
   return `engine ${e.version}` + (e.commit && e.commit.includes("dirty") ? " (đang sửa)" : "") + (e.sha ? ` · ${String(e.sha).slice(0, 8)}` : "");
+}
+
+function confirmDeleteText(n) {
+  return `Xóa ${n} job?\n\nJob bị ẩn khỏi web. Report trên data-server được chuyển vào thùng rác và tự xóa hẳn sau 30 ngày ` +
+    `(trong thời gian đó quản trị có thể khôi phục). Report offline chỉ bị ẩn, không xóa file.`;
+}
+function trashText(t) {
+  if (!t) return "";
+  const what = t.kind === "restore" ? "khôi phục" : "chuyển vào thùng rác";
+  if (t.status === "pending" || t.status === "dispatched") return `chờ data-server ${what}`;
+  return (t.ok ? "" : "lỗi: ") + (t.note || what);
+}
+
+/* ---------- Quản trị (chỉ admin) ---------- */
+async function pageAdmin(main, tab) {
+  if (!ST.is_admin) { main.replaceChildren(h("p", { class: "err" }, "Chỉ admin.")); return; }
+  const [t0, ...rest] = tab.split("?");
+  const qs = new URLSearchParams(rest.join("?"));
+  const tabs = [["users", "Tài khoản"], ["alphas", "Alpha"], ["subs", "Bản nộp"], ["jobs", "Backtest"]];
+  const bar = h("div", { class: "pager" }, tabs.map(([k, l]) => h("a", { class: "btn" + (k === t0 ? " primary" : ""), href: "#/admin/" + k }, l)));
+  const body = h("div", { class: "card" }, h("p", { class: "muted" }, "Đang tải…"));
+  main.classList.add("wide");
+  main.replaceChildren(h("h2", {}, "Quản trị"), bar, body);
+  const users = (await api("/api/admin/users")).users || [];
+  const userSel = (cur, onPick) => h("select", { on: { change: (ev) => onPick(ev.target.value) } },
+    h("option", { value: "" }, "Mọi tài khoản"), users.map((u) => h("option", { value: u.id, selected: String(u.id) === String(cur) }, u.slug)));
+  const goto = (t, params) => { location.hash = "#/admin/" + t + (params && params.toString() ? "?" + params.toString() : ""); };
+  if (t0 === "users") return adminUsers(body, users);
+  if (t0 === "alphas") {
+    const r = await api("/api/admin/alphas" + (qs.get("user") ? "?user=" + qs.get("user") : ""));
+    body.replaceChildren(h("div", { class: "row" }, h("label", {}, "Tài khoản", h("br"), userSel(qs.get("user"), (v) => goto("alphas", new URLSearchParams(v ? { user: v } : {}))))),
+      h("p", { class: "muted small" }, `${r.alphas.length} alpha. Mã nguồn alpha chỉ nằm trên data-server; duyệt bản nộp bằng qc_review trên data-server.`),
+      h("table", {}, h("tr", {}, h("th", {}, "Tài khoản"), h("th", {}, "Alpha"), h("th", {}, "Khung"), h("th", {}, "Tham số"), h("th", {}, "Job"), h("th", {}, "Cập nhật (UTC)")),
+        r.alphas.map((a) => h("tr", {}, h("td", {}, a.slug), h("td", { class: "mono" }, a.name), h("td", {}, a.required_period || "–"),
+          h("td", { class: "mono small" }, a.params.join(", ")),
+          h("td", {}, h("a", { href: `#/admin/jobs?user=${a.user_id}&q=${encodeURIComponent(a.name)}` }, String(a.jobs))), h("td", { class: "muted" }, a.updated)))));
+    return;
+  }
+  if (t0 === "subs") {
+    const off = parseInt(qs.get("offset") || "0", 10) || 0;
+    const r = await api(`/api/admin/submissions?offset=${off}` + (qs.get("user") ? "&user=" + qs.get("user") : ""));
+    const nav = (d) => { const p = new URLSearchParams(qs); p.set("offset", Math.max(0, off + d)); goto("subs", p); };
+    body.replaceChildren(h("div", { class: "row" }, h("label", {}, "Tài khoản", h("br"), userSel(qs.get("user"), (v) => goto("subs", new URLSearchParams(v ? { user: v } : {}))))),
+      h("div", { class: "pager" }, h("button", { class: "btn", disabled: off <= 0, on: { click: () => nav(-50) } }, "‹ Mới hơn"),
+        h("button", { class: "btn", disabled: off + 50 >= r.total, on: { click: () => nav(50) } }, "Cũ hơn ›"), h("span", { class: "muted" }, `${r.total} bản nộp`)),
+      h("table", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Tài khoản"), h("th", {}, "Tên"), h("th", {}, "Trạng thái"), h("th", {}, "Thông báo"), h("th", {}, "Byte"), h("th", {}, "Nộp lúc (UTC)")),
+        r.rows.map((x) => h("tr", {}, h("td", {}, x.id), h("td", {}, x.slug), h("td", { class: "mono" }, x.name), h("td", {}, subTag(x.status)),
+          h("td", { class: "small" }, x.message || ""), h("td", { class: "muted" }, x.size || ""), h("td", { class: "muted" }, x.created)))));
+    return;
+  }
+  return adminJobs(body, qs, userSel, goto);
+}
+
+function adminUsers(body, users, notice) {
+  const out = h("div", {}, notice || null);
+  const showPw = (label, r) => out.replaceChildren(r.ok
+    ? h("div", { class: "banner warnbox" }, `${label}. Mật khẩu (chỉ hiện MỘT lần, gửi riêng cho người dùng): `, h("b", { class: "mono" }, r.password))
+    : h("p", { class: "err" }, r.error || "Lỗi"));
+  const email = h("input", { type: "text", size: 30, placeholder: "email" });
+  const slug = h("input", { type: "text", size: 20, placeholder: "slug, vd nguyen-van-a" });
+  const os1 = h("select", {}, h("option", { value: "0" }, "Loại 1 (chỉ IS)"), h("option", { value: "1" }, "Loại 2 (IS + OS1)"));
+  const create = h("button", { class: "btn primary", on: { click: async () => {
+    const r = await api("/api/admin/users", { email: email.value, slug: slug.value, os1_access: os1.value === "1" });
+    showPw(`Đã tạo ${email.value} (hậu tố alpha ${r.alpha_suffix || ""})`, r);
+    if (r.ok) { const keep = out.firstChild; adminUsers(body, (await api("/api/admin/users")).users || [], keep); }
+  } } }, "Tạo tài khoản");
+  const act = async (u, path, payload, label) => {
+    const r = await api(`/api/admin/users/${u.id}/${path}`, payload);
+    if (path === "password") { showPw(`Đã đặt lại mật khẩu cho ${u.email}`, r); return; }
+    if (!r.ok) { alert(r.error || "Lỗi"); return; }
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  };
+  const deskText = (u) => {
+    if (!u.desk) return h("span", { class: "err small" }, "chưa cấu hình trên data-server");
+    const d = u.desk, warn = d.os1_access !== undefined && d.os1_access !== !!u.os1_access;
+    return h("span", { class: warn ? "warn small" : "muted small" }, `loại ${d.os1_access ? 2 : 1}` + (d.auto_approve ? ", tự duyệt" : "") +
+      (warn ? " · KHÁC web: sửa desk_config" : ""));
+  };
+  body.replaceChildren(
+    h("h3", {}, "Tạo tài khoản"),
+    h("div", { class: "row" }, email, slug, os1, create),
+    h("p", { class: "muted small" }, "Tài khoản mới chỉ chạy được job khi data-server có cấu hình cho slug đó (desk_config: thư mục, tên, loại). Loại tài khoản do data-server quyết định khi chạy job; đổi loại ở đây phải đổi cả desk_config."),
+    out,
+    h("h3", {}, `Tài khoản (${users.length})`),
+    h("table", {}, h("tr", {}, h("th", {}, "Email"), h("th", {}, "Slug"), h("th", {}, "Loại (web)"), h("th", {}, "Data-server"), h("th", {}, "Alpha"), h("th", {}, "Job"),
+      h("th", {}, "Offline"), h("th", {}, "Đã xóa"), h("th", {}, "Đăng nhập cuối (UTC)"), h("th", {}, "")),
+      users.map((u) => h("tr", { class: u.disabled ? "muted" : "" },
+        h("td", {}, u.email, u.is_admin ? h("span", { class: "tag done" }, " admin") : null, u.disabled ? h("span", { class: "tag failed" }, " đã khóa") : null),
+        h("td", { class: "mono" }, u.slug), h("td", {}, h("select", { on: { change: (ev) => act(u, "update", { os1_access: ev.target.value === "1" }) } },
+          h("option", { value: "0", selected: !u.os1_access }, "Loại 1"), h("option", { value: "1", selected: !!u.os1_access }, "Loại 2"))),
+        h("td", {}, deskText(u)),
+        h("td", {}, h("a", { href: "#/admin/alphas?user=" + u.id }, String(u.alphas))),
+        h("td", {}, h("a", { href: "#/admin/jobs?user=" + u.id }, String(u.jobs)), u.active ? h("span", { class: "muted small" }, ` (${u.active} đang chạy)`) : null),
+        h("td", {}, String(u.offline)), h("td", {}, u.deleted ? h("a", { href: `#/admin/jobs?user=${u.id}&deleted=1` }, String(u.deleted)) : "0"),
+        h("td", { class: "muted" }, u.last_login || "–"),
+        h("td", {}, h("button", { class: "btn", on: { click: () => { if (confirm(`Đặt lại mật khẩu cho ${u.email}? Phiên đăng nhập cũ bị đăng xuất.`)) act(u, "password", {}); } } }, "Đặt lại mật khẩu"),
+          u.is_admin ? null : h("button", { class: "btn" + (u.disabled ? "" : " danger"), on: { click: () => {
+            if (confirm(u.disabled ? `Mở khóa ${u.email}?` : `Khóa ${u.email}? Người dùng bị đăng xuất và không đăng nhập được.`)) act(u, "update", { disabled: !u.disabled });
+          } } }, u.disabled ? "Mở khóa" : "Khóa"))))));
+}
+
+async function adminJobs(body, qs, userSel, goto) {
+  const off = parseInt(qs.get("offset") || "0", 10) || 0, LIM = 30;
+  const params = new URLSearchParams(qs); params.set("limit", LIM); params.set("offset", off);
+  if (!params.has("deleted")) params.set("deleted", "0");
+  const r = await api("/api/admin/jobs?" + params.toString());
+  const selected = new Set();
+  const setQ = (k, v) => { const p = new URLSearchParams(qs); if (v === "" || v == null) p.delete(k); else p.set(k, v); p.delete("offset"); goto("jobs", p); };
+  const sel = (k, opts) => h("select", { on: { change: (ev) => setQ(k, ev.target.value) } }, opts.map(([v, l]) => h("option", { value: v, selected: (qs.get(k) || (k === "deleted" ? "0" : "")) === v }, l)));
+  const term = h("input", { type: "text", size: 18, placeholder: "alpha hoặc #job", value: qs.get("q") || "", on: { change: (ev) => setQ("q", ev.target.value.trim()) } });
+  const deletedView = (qs.get("deleted") || "0") === "1";
+  const msg = h("span", { class: "muted small" });
+  const actBtn = h("button", { class: "btn " + (deletedView ? "primary" : "danger"), disabled: true, on: { click: async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (deletedView ? !confirm(`Khôi phục ${ids.length} job? Report trong thùng rác được chuyển về chỗ cũ.`) : !confirm(confirmDeleteText(ids.length))) return;
+    actBtn.disabled = true;
+    const res = await api("/api/admin/jobs/" + (deletedView ? "restore" : "delete"), { ids });
+    const bad = (res.results || []).filter((x) => !x.ok);
+    alert(`${deletedView ? "Đã khôi phục" : "Đã xóa"} ${(res.results || []).length - bad.length} job.` + (bad.length ? "\nKhông được: " + bad.map((x) => `#${x.id} (${x.reason})`).join(", ") : ""));
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } } }, deletedView ? "Khôi phục đã chọn" : "Xóa đã chọn");
+  const sync = () => { actBtn.disabled = !selected.size; actBtn.textContent = (deletedView ? "Khôi phục đã chọn" : "Xóa đã chọn") + (selected.size ? ` (${selected.size})` : ""); };
+  const canAct = (j) => deletedView ? !!j.deleted : j.deletable;
+  const nav = (d) => { const p = new URLSearchParams(qs); p.set("offset", Math.max(0, off + d)); goto("jobs", p); };
+  body.replaceChildren(
+    h("div", { class: "row" },
+      h("label", {}, "Tài khoản", h("br"), userSel(qs.get("user"), (v) => setQ("user", v))),
+      h("label", {}, "Trạng thái", h("br"), sel("status", [["", "Mọi trạng thái"], ["queued", "đang chờ"], ["running", "đang chạy"], ["done", "xong"], ["failed", "lỗi"], ["cancelled", "đã hủy"]])),
+      h("label", {}, "Nguồn", h("br"), sel("src", [["", "Tất cả"], ["web", "Chạy trên web"], ["offline", "Report offline"], ["os1", "OS1"]])),
+      h("label", {}, "Hiển thị", h("br"), sel("deleted", [["0", "Chưa xóa"], ["1", "Đã xóa (thùng rác)"], ["all", "Tất cả"]])),
+      h("label", {}, "Tìm", h("br"), term)),
+    h("div", { class: "pager" }, actBtn, msg,
+      h("button", { class: "btn", disabled: off <= 0, on: { click: () => nav(-LIM) } }, "‹ Mới hơn"),
+      h("button", { class: "btn", disabled: off + LIM >= r.total, on: { click: () => nav(LIM) } }, "Cũ hơn ›"),
+      h("span", { class: "muted" }, `${r.total} job · trang ${Math.floor(off / LIM) + 1}/${Math.max(1, Math.ceil(r.total / LIM))}`)),
+    h("table", {}, h("tr", {}, h("th", {}, h("input", { type: "checkbox", title: "Chọn cả trang", on: { change: (ev) => {
+      body.querySelectorAll("input.jsel").forEach((b) => { b.checked = ev.target.checked; b.dispatchEvent(new Event("change")); }); } } })),
+      h("th", {}, "#"), h("th", {}, "Tài khoản"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Kết quả"),
+      h("th", {}, "Thùng rác"), h("th", {}, "Tạo lúc (UTC)")),
+      r.rows.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
+        h("td", { on: { click: (ev) => ev.stopPropagation() } }, canAct(j) ? h("input", { type: "checkbox", class: "jsel", on: { change: (ev) => {
+          if (ev.target.checked) selected.add(j.id); else selected.delete(j.id); sync(); } } }) : h("span", { class: "muted small", title: "Không xóa được (đang chạy, OS1 hoặc nguồn của OS1)" }, "–")),
+        h("td", {}, j.id), h("td", {}, j.slug), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"),
+        h("td", {}, tag(j.status), j.deleted ? h("span", { class: "tag failed" }, " đã xóa") : null),
+        h("td", { class: "small" }, j.summary ? `${j.summary.variants} biến thể, ${j.summary.is_pass} pass` : (j.message || "").slice(0, 60)),
+        h("td", { class: "small muted" }, trashText(j.trash)), h("td", { class: "muted" }, j.created)))));
 }
 
 /* ---------- Hỏi AI ---------- */
@@ -588,6 +760,15 @@ async function pageJob(main, id) {
       h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate} · swap ${c.swap_mode} · ${c.variants} biến thể`),
       h("p", { class: "mono muted" }, Object.entries(c.params).filter(([, v]) => v[1] > 0).map(([k, v]) => `${k}: ${v[0]}→${v[2]} step ${v[1]}`).join("  |  ") || "(không có lưới)")],
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,
+      job.owner ? h("p", { class: "muted small" }, `Tài khoản: ${job.owner.slug} (${job.owner.email})` + (job.deleted ? " · ĐÃ XÓA" : "") +
+        (job.trash ? ` · thùng rác: ${trashText(job.trash)}` : "")) : null,
+      job.deletable ? h("button", { class: "btn danger", on: { click: async (ev) => {
+        if (!confirm(confirmDeleteText(1))) return;
+        ev.target.disabled = true;
+        const r = await api(`/api/jobs/${id}/delete`, {});
+        if (r.ok) location.hash = ST.is_admin && job.owner && job.owner.slug !== ST.slug ? "#/admin/jobs" : "#/jobs";
+        else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
+      } } }, "Xóa report này") : null,
       !live ? h("a", { class: "btn", href: "#/ask?job=" + job.id }, "Hỏi AI về job này") : null,
       job.summary && c.type !== "os1" ? h("p", {}, `Kết quả: ${job.summary.variants} biến thể, ${job.summary.is_pass} pass IS, ${job.summary.minutes} phút. Thư mục báo cáo trên data-server: ${job.summary.report || ""}`) : null);
     const ver = job.summary && job.summary.report ? String(job.summary.report).split(/[\/]/).pop() : "";
@@ -599,7 +780,20 @@ async function pageJob(main, id) {
     if (job.status === "done" && !viewer) viewer = buildViewer(id, job);
     main.classList.toggle("wide", job.status === "done");
     const doneNote = job.status === "done" && job.notice ? h("div", { class: "banner warnbox" }, job.notice) : null;
-    holder.replaceChildren(...[c.type === "os1" && job.status === "done" ? head : (slim || head), doneNote, job.status === "done" ? viewer : null].filter(Boolean));
+    const adminBar = job.owner && slim ? h("div", { class: "vwbar" }, h("span", { class: "muted" }, `Tài khoản ${job.owner.slug}` + (job.deleted ? " · ĐÃ XÓA" : "")),
+      job.deletable ? h("button", { class: "btn danger", on: { click: async (ev) => {
+        if (!confirm(confirmDeleteText(1))) return;
+        ev.target.disabled = true;
+        const r = await api(`/api/jobs/${id}/delete`, {});
+        if (r.ok) location.hash = "#/admin/jobs"; else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
+      } } }, "Xóa report này") : null) : null;
+    const ownBar = !job.owner && slim && job.deletable ? h("div", { class: "vwbar" }, h("button", { class: "btn danger", on: { click: async (ev) => {
+        if (!confirm(confirmDeleteText(1))) return;
+        ev.target.disabled = true;
+        const r = await api(`/api/jobs/${id}/delete`, {});
+        if (r.ok) location.hash = "#/jobs"; else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
+      } } }, "Xóa report này")) : null;
+    holder.replaceChildren(...[c.type === "os1" && job.status === "done" ? head : (slim || head), adminBar, ownBar, doneNote, job.status === "done" ? viewer : null].filter(Boolean));
     if (!live) clearTimers();
   }
   await render();

@@ -10,6 +10,7 @@ Chạy:  python qc_web.py        (cấu hình ở web_config.json, tạo bằng 
 """
 import hashlib
 import hmac
+import re
 import io
 import zipfile
 import http.cookies
@@ -139,6 +140,16 @@ def init_db():
     # mỗi biến thể chỉ chạy OS1 một lần (job lỗi/hủy trước khi có kết quả thì được nộp lại)
     con.execute("create unique index if not exists ux_os1_src on jobs(src_job_id, src_run_id) "
                 "where type='os1' and status not in ('failed','cancelled')")
+    jcols = {r[1] for r in con.execute("pragma table_info(jobs)")}
+    if "deleted" not in jcols:      # xóa mềm: ẩn khỏi web, report trên data-server vào thùng rác (tự dọn sau 30 ngày)
+        con.execute("alter table jobs add column deleted integer default 0")
+        con.execute("alter table jobs add column deleted_at text")
+        con.execute("alter table jobs add column deleted_by integer")
+    ucols = {r[1] for r in con.execute("pragma table_info(users)")}
+    if "disabled" not in ucols:     # admin khóa tài khoản: không đăng nhập được, phiên cũ bị xóa
+        con.execute("alter table users add column disabled integer default 0")
+    if "last_login" not in ucols:
+        con.execute("alter table users add column last_login text")
     vcols = {r[1] for r in con.execute("pragma table_info(variants)")}
     if "stopped_out" not in vcols:
         con.execute("alter table variants add column stopped_out integer default 0")
@@ -251,6 +262,90 @@ def zero_trade_notice(con, r):
     return ""
 
 
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,80}\.[^@\s]{2,20}$")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
+DELETABLE_STATUS = ("done", "failed", "cancelled")
+
+
+def os1_children(con, ids):
+    """Các job IS (trong ids) đã có biến thể được nộp chạy OS1 -> giữ lại làm bằng chứng của cổng OS1."""
+    ids = [int(x) for x in ids]
+    if not ids:
+        return set()
+    marks = ",".join("?" * len(ids))
+    return {r[0] for r in con.execute(f"select distinct src_job_id from jobs where type='os1' and src_job_id in ({marks})", ids)}
+
+
+def job_deletable(con, j, children=None):
+    if j["deleted"]:
+        return False, "đã xóa"
+    if j["status"] not in DELETABLE_STATUS:
+        return False, "job đang chờ hoặc đang chạy: hãy hủy trước"
+    if j["type"] == "os1":
+        return False, "job OS1 được giữ lại (sổ OS1)"
+    kids = children if children is not None else os1_children(con, [j["id"]])
+    if j["id"] in kids:
+        return False, "job có biến thể đã nộp chạy OS1 nên được giữ lại"
+    return True, ""
+
+
+def delete_jobs(con, ids, actor_id, owner_uid=None):
+    """Xóa mềm: ẩn job khỏi web; job chạy trên web -> yêu cầu data-server chuyển report vào thùng rác.
+    Report offline (của Dương/agent) chỉ ẩn, không động vào file. owner_uid=None: admin (mọi tài khoản)."""
+    out = []
+    ids = [int(x) for x in ids if str(x).isdigit()][:200]
+    kids = os1_children(con, ids)
+    for jid in ids:
+        if owner_uid is None:
+            j = con.execute("select * from jobs where id=?", (jid,)).fetchone()
+        else:
+            j = con.execute("select * from jobs where id=? and user_id=?", (jid, owner_uid)).fetchone()
+        if not j:
+            out.append({"id": jid, "ok": False, "reason": "không có job"})
+            continue
+        ok, why = job_deletable(con, j, kids)
+        if not ok:
+            out.append({"id": jid, "ok": False, "reason": why})
+            continue
+        con.execute("update jobs set deleted=1, deleted_at=?, deleted_by=? where id=?", (now_iso(), actor_id, jid))
+        if j["type"] != "offline":
+            con.execute("delete from requests where job_id=? and kind in ('trash','restore') and status='pending'", (jid,))
+            con.execute("insert into requests(user_id,job_id,kind,payload_json,status,created) values(?,?,?,?,?,?)",
+                        (j["user_id"], jid, "trash", "{}", "pending", time.time()))
+        out.append({"id": jid, "ok": True, "offline": j["type"] == "offline"})
+    con.commit()
+    return out
+
+
+def restore_jobs(con, ids):
+    """Admin khôi phục job đã xóa (report còn trong thùng rác thì data-server chuyển về chỗ cũ)."""
+    out = []
+    for jid in [int(x) for x in ids if str(x).isdigit()][:200]:
+        j = con.execute("select * from jobs where id=?", (jid,)).fetchone()
+        if not j or not j["deleted"]:
+            out.append({"id": jid, "ok": False, "reason": "job không ở trạng thái đã xóa"})
+            continue
+        con.execute("update jobs set deleted=0, deleted_at=NULL, deleted_by=NULL where id=?", (jid,))
+        if j["type"] != "offline":
+            n = con.execute("delete from requests where job_id=? and kind='trash' and status='pending'", (jid,)).rowcount
+            if not n:   # report đã (hoặc đang) vào thùng rác -> yêu cầu chuyển về
+                con.execute("insert into requests(user_id,job_id,kind,payload_json,status,created) values(?,?,?,?,?,?)",
+                            (j["user_id"], jid, "restore", "{}", "pending", time.time()))
+        out.append({"id": jid, "ok": True})
+    con.commit()
+    return out
+
+
+def trash_state(con, jid):
+    r = con.execute("select kind, status, result_json from requests where job_id=? and kind in ('trash','restore') "
+                    "order by id desc limit 1", (jid,)).fetchone()
+    if not r:
+        return None
+    res = json.loads(r["result_json"]) if r["result_json"] else None
+    return {"kind": r["kind"], "status": r["status"], "ok": (res or {}).get("ok"), "note": (res or {}).get("note") or (res or {}).get("error"),
+            "bytes": (res or {}).get("bytes")}
+
+
 def sweep_once():
     """Phát hiện việc bị kẹt, chuyển sang trạng thái lỗi kèm hướng dẫn cho trader."""
     con = db()
@@ -335,9 +430,10 @@ class Handler(BaseHTTPRequestHandler):
         m = c.get("qc_session")
         if not m:
             return None
-        s = con.execute("select s.token, s.csrf, s.expires, u.id, u.email, u.slug, u.is_admin, u.os1_access "
+        s = con.execute("select s.token, s.csrf, s.expires, u.id, u.email, u.slug, u.is_admin, u.os1_access, "
+                        "coalesce(u.disabled,0) as disabled "
                         "from sessions s join users u on u.id=s.user_id where s.token=?", (m.value,)).fetchone()
-        if not s or s["expires"] < time.time():
+        if not s or s["expires"] < time.time() or s["disabled"]:
             return None
         return s
 
@@ -450,7 +546,10 @@ class Handler(BaseHTTPRequestHandler):
                 fails.append(now)
                 _login_fail[email] = fails
                 return self.fail(401, "Email hoặc mật khẩu sai")
+            if u["disabled"]:
+                return self.fail(403, "Tài khoản đã bị khóa. Liên hệ quản trị.")
             _login_fail.pop(email, None)
+            con.execute("update users set last_login=? where id=?", (now_iso(), u["id"]))
             tok, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
             con.execute("insert into sessions(token,user_id,csrf,expires) values(?,?,?,?)",
                         (tok, u["id"], csrf, now + CFG["session_hours"] * 3600))
@@ -483,7 +582,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "email": s["email"], "slug": s["slug"], "csrf": s["csrf"],
                                        "desk_notice": offline_note(con, "Job và bản nộp alpha"),
                                        "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
-                                       "os1_access": bool(s["os1_access"]),
+                                       "os1_access": bool(s["os1_access"]), "is_admin": bool(s["is_admin"]),
+                                       "can_delete": bool(s["os1_access"] or s["is_admin"]),
                                        "todate_max": LIMITS["os1_end"] if s["os1_access"] else LIMITS["is_end"],
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "symbols": C.symbols_info(), "groups": C.GROUPS, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
@@ -496,19 +596,35 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["jobs"] and method == "GET":
                 off = max(0, int(q.get("offset", ["0"])[0]))
                 lim = min(100, max(1, int(q.get("limit", ["30"])[0])))
-                kind = "type='os1'" if q.get("kind", [""])[0] == "os1" else "type!='os1'"
+                kind = ("type='os1'" if q.get("kind", [""])[0] == "os1" else "type!='os1'") + " and coalesce(deleted,0)=0"
                 src = q.get("src", [""])[0]
                 if src == "web":
                     kind += " and type!='offline'"
                 elif src == "offline":
                     kind += " and type='offline'"
-                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json,src_job_id,src_run_id,source "
-                                   f"from jobs where user_id=? and {kind} order by created desc, id desc limit ? offset ?",
+                rows = con.execute("select id,type,alpha,status,progress,message,created,finished,summary_json,src_job_id,src_run_id,source,"
+                                   f"deleted from jobs where user_id=? and {kind} order by created desc, id desc limit ? offset ?",
                                    (uid, lim, off)).fetchall()
                 total = con.execute(f"select count(*) from jobs where user_id=? and {kind}", (uid,)).fetchone()[0]
-                n_off = con.execute("select count(*) from jobs where user_id=? and type='offline'", (uid,)).fetchone()[0]
-                return self.send_json({"ok": True, "total": total, "offline_total": n_off,
-                                       "jobs": [dict(self.job_row(r), notice=job_notice(con, r)) for r in rows]})
+                n_off = con.execute("select count(*) from jobs where user_id=? and type='offline' and coalesce(deleted,0)=0",
+                                    (uid,)).fetchone()[0]
+                can_del = bool(s["os1_access"] or s["is_admin"])
+                kids = os1_children(con, [r["id"] for r in rows]) if can_del else set()
+                return self.send_json({"ok": True, "total": total, "offline_total": n_off, "can_delete": can_del,
+                                       "jobs": [dict(self.job_row(r), notice=job_notice(con, r),
+                                                     deletable=can_del and job_deletable(con, r, kids)[0]) for r in rows]})
+            if parts == ["jobs", "delete"] and method == "POST":
+                if not (s["os1_access"] or s["is_admin"]):
+                    return self.fail(403, "tài khoản của bạn không có quyền xóa report")
+                body = self.read_json()
+                ids = body.get("ids") if isinstance(body, dict) else None
+                if not isinstance(ids, list) or not ids:
+                    return self.fail(400, "chọn ít nhất một job")
+                return self.send_json({"ok": True, "results": delete_jobs(con, ids, uid, owner_uid=uid)})
+            if parts and parts[0] == "admin":
+                if not s["is_admin"]:
+                    return self.fail(403, "chỉ admin")
+                return self.admin_api(con, s, parts[1:], method, q)
             if parts == ["jobs"] and method == "POST":
                 return self.create_job(con, uid)
             if parts == ["ask"] and method == "POST":
@@ -542,9 +658,12 @@ class Handler(BaseHTTPRequestHandler):
                 d["result"] = json.loads(d.pop("result_json") or "null")
                 return self.send_json({"ok": True, "submission": d})
             if len(parts) >= 2 and parts[0] == "jobs" and parts[1].isdigit():
-                return self.job_api(con, uid, int(parts[1]), parts[2:], method, q)
+                return self.job_api(con, s, int(parts[1]), parts[2:], method, q)
             if len(parts) == 2 and parts[0] == "requests" and parts[1].isdigit() and method == "GET":
-                r = con.execute("select * from requests where id=? and user_id=?", (int(parts[1]), uid)).fetchone()
+                if s["is_admin"]:
+                    r = con.execute("select * from requests where id=?", (int(parts[1]),)).fetchone()
+                else:
+                    r = con.execute("select * from requests where id=? and user_id=?", (int(parts[1]), uid)).fetchone()
                 if not r:
                     return self.fail(404, "không có yêu cầu")
                 status = r["status"]
@@ -595,7 +714,7 @@ class Handler(BaseHTTPRequestHandler):
         kind, ref = "general", None
         if body.get("job_id"):
             ref = int(body["job_id"]) if str(body["job_id"]).isdigit() else 0
-            if not con.execute("select 1 from jobs where id=? and user_id=?", (ref, uid)).fetchone():
+            if not con.execute("select 1 from jobs where id=? and user_id=? and coalesce(deleted,0)=0", (ref, uid)).fetchone():
                 return self.fail(404, "không có job này")
             kind = "job"
         elif body.get("submission_id"):
@@ -640,7 +759,7 @@ class Handler(BaseHTTPRequestHandler):
                 out["submission"]["result"] = json.loads(sb["result_json"] or "null")
         out["recent_jobs"] = [dict(r) for r in con.execute(
             "select id, type, alpha, status, substr(message,1,200) as message, created from jobs where user_id=? "
-            "and type!='offline' order by id desc limit 6", (uid,))]
+            "and type!='offline' and coalesce(deleted,0)=0 order by id desc limit 6", (uid,))]
         out["recent_submissions"] = [dict(r) for r in con.execute(
             "select id, name, status, substr(message,1,200) as message, created from submissions where user_id=? order by id desc limit 6", (uid,))]
         out["alphas"] = [{"name": r["name"], "meta": json.loads(r["meta_json"] or "{}"), "params": list(json.loads(r["params_json"]).keys())}
@@ -648,7 +767,7 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     ISPASS_SQL = ("from variants v join jobs j on j.id=v.job_id where j.user_id=? and j.type='optimize_is' "
-                  "and j.status='done' and v.is_pass=1 and coalesce(v.stopped_out,0)=0")
+                  "and j.status='done' and coalesce(j.deleted,0)=0 and v.is_pass=1 and coalesce(v.stopped_out,0)=0")
 
     def ispass_list(self, con, uid, q):
         """Trang Alpha pass IS: mọi biến thể pass IS (không stop-out) của trader, kèm trạng thái OS1 của từng biến thể."""
@@ -753,15 +872,30 @@ class Handler(BaseHTTPRequestHandler):
         con.commit()
         self.send_json({"ok": True, "id": cur.lastrowid, "name": name})
 
-    def job_api(self, con, uid, jid, rest, method, q):
-        j = con.execute("select * from jobs where id=? and user_id=?", (jid, uid)).fetchone()
+    def job_api(self, con, s, jid, rest, method, q):
+        uid, admin = s["id"], bool(s["is_admin"])
+        if admin:   # admin xem (và hủy/xóa) job của mọi tài khoản, kể cả job đã xóa
+            j = con.execute("select * from jobs where id=?", (jid,)).fetchone()
+        else:
+            j = con.execute("select * from jobs where id=? and user_id=? and coalesce(deleted,0)=0", (jid, uid)).fetchone()
         if not j:
             return self.fail(404, "không có job")
         if not rest and method == "GET":
             d = self.job_row(j)
             d["config"] = json.loads(j["config_json"])
             d["notice"] = job_notice(con, j)
+            mine = j["user_id"] == uid
+            d["deletable"] = bool((admin or (mine and s["os1_access"])) and job_deletable(con, j)[0])
+            if admin:
+                o = con.execute("select slug, email from users where id=?", (j["user_id"],)).fetchone()
+                d["owner"] = {"slug": o["slug"], "email": o["email"]} if o else None
+                d["trash"] = trash_state(con, jid)
             return self.send_json({"ok": True, "job": d})
+        if rest == ["delete"] and method == "POST":
+            if not (admin or (j["user_id"] == uid and s["os1_access"])):
+                return self.fail(403, "tài khoản của bạn không có quyền xóa report")
+            res = delete_jobs(con, [jid], uid, owner_uid=None if admin else uid)[0]
+            return self.send_json({"ok": res["ok"], "error": res.get("reason")}, 200 if res["ok"] else 409)
         if rest == ["cancel"] and method == "POST":
             if j["status"] == "queued":
                 con.execute("update jobs set status='cancelled', finished=?, message='Đã hủy trước khi chạy' where id=?", (now_iso(), jid))
@@ -830,9 +964,143 @@ class Handler(BaseHTTPRequestHandler):
             if not con.execute("select 1 from variants where job_id=? and run_id=?", (jid, run_id)).fetchone():
                 return self.fail(404, "không có biến thể này")
             cur = con.execute("insert into requests(user_id,job_id,kind,payload_json,status,created) values(?,?,?,?,?,?)",
-                              (uid, jid, kind, json.dumps({"run_id": run_id, "offset": offset, "limit": PAGE}), "pending", time.time()))
+                              (j["user_id"], jid, kind, json.dumps({"run_id": run_id, "offset": offset, "limit": PAGE}), "pending",
+                               time.time()))
             con.commit()
             return self.send_json({"ok": True, "id": cur.lastrowid})
+        return self.fail(404, "không tìm thấy")
+
+    # ---------- API quản trị (chỉ admin) ----------
+    def admin_api(self, con, s, parts, method, q):
+        def qint(k, d=0):
+            v = q.get(k, [""])[0]
+            return int(v) if v.lstrip("-").isdigit() else d
+
+        def body():
+            b = self.read_json()
+            return b if isinstance(b, dict) else {}
+
+        if parts == ["users"] and method == "GET":
+            rows = con.execute("select id, email, slug, is_admin, os1_access, coalesce(disabled,0) as disabled, created, last_login "
+                               "from users order by id").fetchall()
+            out = []
+            for r in rows:
+                n = con.execute("select sum(type!='offline' and coalesce(deleted,0)=0), sum(type='offline' and coalesce(deleted,0)=0), "
+                                "sum(status in ('queued','dispatched','running')), sum(coalesce(deleted,0)=1) from jobs where user_id=?",
+                                (r["id"],)).fetchone()
+                dm = con.execute("select v from meta where k=?", ("desk_sync:" + r["slug"],)).fetchone()
+                desk = json.loads(dm["v"]) if dm else None
+                out.append({**dict(r), "alphas": con.execute("select count(*) from alphas where user_id=?", (r["id"],)).fetchone()[0],
+                            "jobs": n[0] or 0, "offline": n[1] or 0, "active": n[2] or 0, "deleted": n[3] or 0,
+                            "subs": con.execute("select count(*) from submissions where user_id=?", (r["id"],)).fetchone()[0],
+                            "desk": desk})
+            return self.send_json({"ok": True, "users": out, "me": s["id"]})
+        if parts == ["users"] and method == "POST":
+            b = body()
+            email = str(b.get("email", "")).strip().lower()
+            slug = str(b.get("slug", "")).strip().lower()
+            if not EMAIL_RE.match(email):
+                return self.fail(400, "email không hợp lệ")
+            if not SLUG_RE.match(slug):
+                return self.fail(400, "slug chỉ gồm chữ thường, số, dấu - (3-40 ký tự), vd nguyen-van-a")
+            if con.execute("select 1 from users where email=? or slug=?", (email, slug)).fetchone():
+                return self.fail(409, "email hoặc slug đã tồn tại")
+            pw = secrets.token_urlsafe(12)
+            con.execute("insert into users(email,pw,slug,is_admin,os1_access,created) values(?,?,?,?,?,?)",
+                        (email, hash_pw(pw), slug, 0, 1 if b.get("os1_access") else 0, now_iso()))
+            con.commit()
+            return self.send_json({"ok": True, "password": pw, "alpha_suffix": alpha_suffix(slug)})
+        if len(parts) == 3 and parts[0] == "users" and parts[1].isdigit() and method == "POST":
+            uid = int(parts[1])
+            u = con.execute("select * from users where id=?", (uid,)).fetchone()
+            if not u:
+                return self.fail(404, "không có tài khoản")
+            if parts[2] == "password":
+                pw = secrets.token_urlsafe(12)
+                con.execute("update users set pw=? where id=?", (hash_pw(pw), uid))
+                con.execute("delete from sessions where user_id=?", (uid,))
+                con.commit()
+                return self.send_json({"ok": True, "password": pw})
+            if parts[2] == "update":
+                b = body()
+                if "disabled" in b:
+                    dis = 1 if b["disabled"] else 0
+                    if dis and uid == s["id"]:
+                        return self.fail(400, "không tự khóa tài khoản đang dùng")
+                    if dis and u["is_admin"]:
+                        return self.fail(400, "không khóa tài khoản admin qua web")
+                    con.execute("update users set disabled=? where id=?", (dis, uid))
+                    if dis:
+                        con.execute("delete from sessions where user_id=?", (uid,))
+                if "os1_access" in b:
+                    con.execute("update users set os1_access=? where id=?", (1 if b["os1_access"] else 0, uid))
+                con.commit()
+                return self.send_json({"ok": True})
+        if parts == ["alphas"] and method == "GET":
+            uid = qint("user")
+            rows = con.execute("select a.name, a.params_json, a.meta_json, a.updated, u.slug, u.id as user_id from alphas a "
+                               "join users u on u.id=a.user_id " + ("where a.user_id=? " if uid else "") + "order by u.slug, a.name",
+                               (uid,) if uid else ()).fetchall()
+            return self.send_json({"ok": True, "alphas": [
+                {"name": r["name"], "slug": r["slug"], "user_id": r["user_id"], "params": list(json.loads(r["params_json"]).keys()),
+                 "required_period": json.loads(r["meta_json"] or "{}").get("required_period"), "updated": r["updated"],
+                 "jobs": con.execute("select count(*) from jobs where user_id=? and alpha=? and coalesce(deleted,0)=0",
+                                     (r["user_id"], r["name"])).fetchone()[0]} for r in rows]})
+        if parts == ["submissions"] and method == "GET":
+            uid, off = qint("user"), max(0, qint("offset"))
+            where, args = ("where s.user_id=? ", [uid]) if uid else ("", [])
+            total = con.execute("select count(*) from submissions s " + where, args).fetchone()[0]
+            rows = con.execute("select s.id, s.name, s.size, s.status, s.message, s.created, s.updated, u.slug from submissions s "
+                               "join users u on u.id=s.user_id " + where + "order by s.id desc limit 50 offset ?", args + [off]).fetchall()
+            return self.send_json({"ok": True, "total": total, "rows": [dict(r) for r in rows]})
+        if parts == ["jobs"] and method == "GET":
+            off, lim = max(0, qint("offset")), min(100, max(1, qint("limit", 30)))
+            where, args = [], []
+            if qint("user"):
+                where.append("j.user_id=?")
+                args.append(qint("user"))
+            st = q.get("status", [""])[0]
+            if st in ("queued", "dispatched", "running", "done", "failed", "cancelled"):
+                where.append("j.status=?")
+                args.append(st)
+            src = q.get("src", [""])[0]
+            if src == "web":
+                where.append("j.type not in ('offline','os1')")
+            elif src == "offline":
+                where.append("j.type='offline'")
+            elif src == "os1":
+                where.append("j.type='os1'")
+            dl = q.get("deleted", ["0"])[0]
+            if dl in ("0", "1"):
+                where.append("coalesce(j.deleted,0)=?")
+                args.append(int(dl))
+            term = q.get("q", [""])[0].strip().lstrip("#")[:60]
+            if term.isdigit():              # số (hoặc #số) = đúng số job
+                where.append("j.id=?")
+                args.append(int(term))
+            elif term:
+                where.append("j.alpha like ?")
+                args.append(f"%{term}%")
+            wsql = ("where " + " and ".join(where) + " ") if where else ""
+            total = con.execute("select count(*) from jobs j " + wsql, args).fetchone()[0]
+            rows = con.execute("select j.*, u.slug from jobs j join users u on u.id=j.user_id " + wsql +
+                               "order by j.id desc limit ? offset ?", args + [lim, off]).fetchall()
+            kids = os1_children(con, [r["id"] for r in rows])
+            out = []
+            for r in rows:
+                d = self.job_row(r)
+                for k in ("config_json", "ext_key", "cancel", "last_update", "progress_at"):
+                    d.pop(k, None)
+                d["deletable"] = job_deletable(con, r, kids)[0]
+                d["trash"] = trash_state(con, r["id"]) if r["deleted"] or r["type"] != "offline" else None
+                out.append(d)
+            return self.send_json({"ok": True, "total": total, "rows": out})
+        if parts in (["jobs", "delete"], ["jobs", "restore"]) and method == "POST":
+            ids = body().get("ids")
+            if not isinstance(ids, list) or not ids:
+                return self.fail(400, "chọn ít nhất một job")
+            res = delete_jobs(con, ids, s["id"]) if parts[1] == "delete" else restore_jobs(con, ids)
+            return self.send_json({"ok": True, "results": res})
         return self.fail(404, "không tìm thấy")
 
     # ---------- API của data-server ----------
@@ -854,6 +1122,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not u:
                     return self.fail(404, "slug không tồn tại")
                 items = body.get("alphas") if isinstance(body.get("alphas"), list) else []
+                slug = str(body.get("slug"))
+                dcfg = {k: bool(body[k]) for k in ("os1_access", "auto_approve") if k in body}
+                con.execute("insert into meta(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+                            ("desk_sync:" + slug, json.dumps({"at": time.time(), **dcfg})))
                 con.execute("delete from alphas where user_id=?", (u["id"],))
                 for a in items:
                     if isinstance(a.get("name"), str) and C.NAME_RE.match(a["name"]) and isinstance(a.get("params"), dict):
@@ -968,9 +1240,11 @@ class Handler(BaseHTTPRequestHandler):
         alpha = str(body.get("alpha", ""))[:120]
         source = str(body.get("source", "offline"))[:60]
         created = str(body.get("created") or now_iso())[:19]
-        j = con.execute("select id, user_id from jobs where ext_key=?", (key,)).fetchone()
+        j = con.execute("select id, user_id, coalesce(deleted,0) as deleted from jobs where ext_key=?", (key,)).fetchone()
         if j and j["user_id"] != u["id"]:
             return self.fail(409, "ext_key thuộc tài khoản khác")
+        if j and j["deleted"]:      # report offline đã bị xóa (ẩn) trên web: không nhập lại
+            return self.send_json({"ok": True, "job_id": j["id"], "deleted": True})
         if j:
             con.execute("update jobs set alpha=?, config_json=?, created=?, source=?, status='done', progress=100, "
                         "message='Report offline', last_update=? where id=?",
