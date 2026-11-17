@@ -37,7 +37,8 @@ def required_period(src):
     return found[0] if len(found) == 1 and found[0] in PERIODS else None
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
 
-API_NAMES = {"Tick", "Bar", "AccountView", "OrderSide", "Signal", "AlphaInput", "ParameterSet", "Alpha", "HashMap", "HashSet"}
+API_NAMES = {"Tick", "Bar", "AccountView", "SymbolExposure", "OrderSide", "Signal", "AlphaInput", "ParameterSet", "Alpha",
+             "HashMap", "HashSet"}
 
 # Từ khóa cấm dùng (dưới dạng identifier)
 FORBIDDEN_KEYWORDS = {

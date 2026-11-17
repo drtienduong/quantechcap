@@ -69,7 +69,15 @@ You may still guard with `if bar.period_minutes != 5 { return Signal::Hold; }`, 
   - "Independent" (each symbol separately): engine calls `on_bar` / `on_tick`.
   - "Portfolio" (one shared account, one alpha instance per symbol): engine calls `on_bar_with_account` /
     `on_tick_with_account` (their default implementations forward to `on_bar` / `on_tick`).
-    `AccountView` gives `symbol`, `balance`, `equity`, `used_margin`, `free_margin`, `positions_on_symbol`, `total_positions`.
+    `AccountView` gives `symbol`, `balance`, `equity`, `used_margin`, `free_margin`, `positions_on_symbol`, `total_positions`,
+    and `portfolio`: a slice of `SymbolExposure` (`symbol`, `buy_positions`, `sell_positions`, `buy_lots`, `sell_lots`,
+    `floating_profit`) for EVERY symbol of the account, fixed order, state just before the call (only this account's own
+    positions; no prices of other symbols). Use it for correlation rules, e.g. "do not add to a EUR-long chain while another
+    EUR-long chain already has N positions". Looping over it (<= ~25 elements) is fine, but do it only when about to
+    trade (on_bar, or when an entry/DCA condition fires), not on every tick.
+    Currency of a symbol is not given; for FX/metals split the name yourself:
+    `fn ccy(s: &str) -> Option<(&str, &str)> { if s.len() == 6 { Some((&s[..3], &s[3..])) } else { None } }`
+    (EURAUD -> EUR/AUD, XAUUSD -> XAU/USD; indices, commodities and crypto return None).
   If you only override the `*_with_account` methods, the alpha will not trade in Independent mode, unless you also
   override `fn wants_account(&self) -> bool { true }` (then Independent mode calls them with that symbol's own account).
 - The alpha is not told the symbol or its point size in Independent mode. The pattern
@@ -118,7 +126,9 @@ stop-out level **50%**. Binance crypto symbols (`*_BN`) are exempt: they use no 
 - In Portfolio mode all symbols share one account; in Independent mode each symbol has its own account.
 - `AccountView` (Portfolio mode, or Independent with `wants_account() = true`) gives `equity`, `used_margin`,
   `free_margin`, `leverage`, `contract_size`, `margin_call_level`, `stopout_level`: size positions from them
-  (e.g. risk a percent of equity) instead of a fixed lot when possible.
+  (e.g. risk a percent of equity) instead of a fixed lot when possible. `portfolio` shows lots and floating P/L per
+  symbol: cap the total lots of a DCA chain and of same-currency chains, a doubling DCA without a cap is the usual
+  cause of stop-out.
 - Optional: the alpha may declare stricter rules by overriding `account_leverage()` (e.g. `Some(100.0)` = 1:100),
   `margin_call_level()` or `stopout_level()` (percent). Only stricter values are accepted on the platform
   (leverage <= 1000, margin call >= 100, stop-out >= 50); looser values are ignored.

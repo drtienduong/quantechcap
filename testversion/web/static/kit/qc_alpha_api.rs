@@ -31,6 +31,17 @@ pub struct Bar {
     pub tick_volume: u64,
 }
 
+// Positions of this account on one symbol (see AccountView.portfolio).
+#[derive(Clone, Copy, Debug)]
+pub struct SymbolExposure<'a> {
+    pub symbol: &'a str,          // symbol name as in the job, e.g. "EURUSD"
+    pub buy_positions: usize,     // open BUY positions of this account on the symbol
+    pub sell_positions: usize,    // open SELL positions
+    pub buy_lots: f64,            // total BUY lots
+    pub sell_lots: f64,           // total SELL lots
+    pub floating_profit: f64,     // unrealized P/L in USD of those positions (0 before the symbol's first tick)
+}
+
 pub struct AccountView<'a> {
     pub symbol: &'a str,
     pub balance: f64,
@@ -45,6 +56,9 @@ pub struct AccountView<'a> {
     pub commission_per_lot_per_deal: f64,
     pub margin_call_level: f64,           // % (new orders rejected below this margin level)
     pub stopout_level: f64,               // % (stop-out below this margin level)
+    // Every symbol of the account, fixed order for the whole run: Portfolio = all symbols of the job (also those with
+    // 0 positions); Independent (wants_account) = 1 element, the current symbol. State JUST BEFORE this call.
+    pub portfolio: &'a [SymbolExposure<'a>],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
