@@ -1073,7 +1073,7 @@ function buildViewer(id, job, initRun) {
     const r = await getCode(runId);
     codeBtn.disabled = false;
     if (!r) return;
-    codeInfo.textContent = `${r.name || job.alpha}.rs · ${(r.bytes / 1000).toFixed(1)} KB · ${r.code.split("\n").length} dòng`;
+    codeInfo.textContent = `${r.name || job.alpha}.rs · ${(r.bytes / 1000).toFixed(1)} KB · ${r.code.split("\n").length} dòng` + (r.from_parent ? " · lấy từ report gốc (report này là bản phụ)" : "");
     const copyBtn = h("button", { class: "btn small", on: { click: async (ev) => { if (await copyText(r.code)) { ev.target.textContent = "Đã chép"; setTimeout(() => { ev.target.textContent = "Sao chép mã"; }, 1500); } } } }, "Sao chép mã");
     codeBox.replaceChildren(h("div", { class: "pager" }, copyBtn), h("pre", { class: "vwcode" }, r.code));
     codeBtn.textContent = "Hide code";

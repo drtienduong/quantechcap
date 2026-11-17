@@ -1094,6 +1094,29 @@ def handle_submission(sb):
 
 
 # ---------- yêu cầu dữ liệu theo trang ----------
+def find_alpha_source(run_dir: Path, roots):
+    """Bản mã alpha đã chạy report này: <report>/alpha.rs, hoặc file 'expert' trong report; report phụ (thư mục con
+    không có alpha.rs) thì lấy ở thư mục cha gần nhất có ini cùng expert/alpha_name. Không ra ngoài roots. Trả (Path, từ_thư_mục_cha)."""
+    def ident(d):
+        f = d / "input-optimize.ini"
+        if not f.is_file():
+            return None
+        t = f.read_text(encoding="utf-8", errors="replace")
+        return ((ini_value(t, "expert") or "").strip().lower(), (ini_value(t, "alpha_name") or "").strip().lower())
+    me = ident(run_dir)
+    for depth, d in enumerate([run_dir, run_dir.parent, run_dir.parent.parent]):
+        d = d.resolve()
+        if not any(r == d or r in d.parents for r in roots):
+            break
+        if depth and (me is None or ident(d) != me):
+            continue
+        cands = [d / "alpha.rs"] + ([d / me[0]] if me and me[0].endswith(".rs") and "/" not in me[0] and "\\" not in me[0] else [])
+        for c in cands:
+            if c.is_file():
+                return c, depth > 0
+    return None, False
+
+
 _trash_lock = threading.Lock()
 
 
@@ -1248,13 +1271,14 @@ def handle_request(req):
             raise ValueError("đường dẫn không hợp lệ")
         if kind == "code":
             # mã alpha ĐÚNG bản đã chạy (bản chép trong report); chỉ trader sở hữu job (hoặc admin) xin được, web không lưu lại
-            src = run_dir / "alpha.rs"
-            if not src.is_file():
+            src, from_parent = find_alpha_source(run_dir, roots)
+            if not src:
                 raise ValueError("report không còn bản mã alpha")
             raw = src.read_bytes()
             if len(raw) > 400_000:
                 raise ValueError("mã alpha quá lớn để hiển thị (> 400 KB)")
-            res = {"ok": True, "name": entry.get("alpha") or run_dir.parent.name, "bytes": len(raw),
+            res = {"ok": True, "name": src.stem if src.name != "alpha.rs" else (entry.get("alpha") or run_dir.parent.name),
+                   "bytes": len(raw), "from_parent": from_parent,
                    "code": _PATH_RE.sub("<đường dẫn>", raw.decode("utf-8", errors="replace"))}
             api("POST", f"/api/desk/requests/{rid}/result", res, timeout=60)
             return
