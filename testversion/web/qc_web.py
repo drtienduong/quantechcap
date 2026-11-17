@@ -355,6 +355,10 @@ def sweep_once():
         con.execute("update submissions set status='failed', updated=?, message=? where status='checking' and updated < ?",
                     (now_iso(), "Data-server không trả kết quả kiểm tra (có thể vừa khởi động lại). Mã đã được xóa khỏi web, "
                                 "hãy nộp lại file.", cutoff))
+        # mã alpha không được giao trong 10 phút (người xem đóng trang): xóa khỏi web
+        con.execute("update requests set result_json=? where kind='code' and status='done' and created < ? "
+                    "and result_json like '%\"code\"%'",
+                    (json.dumps({"ok": False, "error": "hết hạn, hãy bấm xem lại"}), now - 600))
         con.execute("update questions set status='failed', answered=?, answer=? where status='dispatched' and dispatched_at < ?",
                     (now_iso(), "Trợ lý AI chưa trả lời kịp (data-server có thể vừa khởi động lại). Hãy hỏi lại.", now - ASK_STALE_SEC))
         d = desk_state(con)
@@ -672,6 +676,10 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"ok": True, "status": status}
                 if status == "done":
                     out["result"] = json.loads(r["result_json"])
+                    if r["kind"] == "code":   # mã alpha: chỉ chuyển tiếp, không giữ trên web
+                        con.execute("update requests set result_json=? where id=?",
+                                    (json.dumps({"ok": False, "error": "mã đã được giao, hãy bấm xem lại"}), r["id"]))
+                        con.commit()
                 return self.send_json(out)
             return self.fail(404, "không tìm thấy")
         finally:
@@ -957,8 +965,8 @@ class Handler(BaseHTTPRequestHandler):
                 offset = max(0, int(body.get("offset", 0)))
             except Exception:
                 return self.fail(400, "yêu cầu không hợp lệ")
-            if kind not in ("trades", "equity", "detail"):
-                return self.fail(400, "kind phải là trades, equity hoặc detail")
+            if kind not in ("trades", "equity", "detail", "code"):
+                return self.fail(400, "kind phải là trades, equity, detail hoặc code")
             if j["status"] != "done":
                 return self.fail(409, "job chưa hoàn tất")
             if not con.execute("select 1 from variants where job_id=? and run_id=?", (jid, run_id)).fetchone():

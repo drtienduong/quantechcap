@@ -45,7 +45,7 @@ function QC_LOGIN() {
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: document.getElementById("email").value, password: document.getElementById("pw").value }) });
     const j = await r.json();
-    if (j.ok) location.href = "/"; else err.textContent = j.error || "Đăng nhập thất bại";
+    if (j.ok) location.href = "/" + (location.hash.startsWith("#/") ? location.hash : ""); else err.textContent = j.error || "Đăng nhập thất bại";
   });
 }
 
@@ -87,7 +87,7 @@ function QC_APP() {
     main.replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
     try {
       if (hash.startsWith("#/run/")) await pageRun(main, decodeURIComponent(hash.slice(6)));
-      else if (hash.startsWith("#/job/")) await pageJob(main, parseInt(hash.slice(6), 10));
+      else if (hash.startsWith("#/job/")) { const m = hash.match(/^#\/job\/(\d+)(?:\/run\/(\d+))?/); await pageJob(main, parseInt(m ? m[1] : hash.slice(6), 10), m && m[2] ? parseInt(m[2], 10) : null); }
       else if (hash === "#/jobs" || hash.startsWith("#/jobs/")) await pageJobs(main, parseInt(hash.slice(7), 10) || 1);
       else if (hash === "#/submit") await pageSubmit(main);
       else if (hash === "#/ask" || hash.startsWith("#/ask?")) await pageAsk(main, new URLSearchParams(hash.split("?")[1] || ""));
@@ -607,7 +607,7 @@ function os1Head(job) {
   const c = job.config, o = (job.summary && job.summary.os1) || {};
   const pr = Object.entries(c.params || {}).map(([k, v]) => `${k}=${v}`).join(" ");
   return [
-    h("p", {}, `OS1 của biến thể run ${c.src_run_id} trong `, h("a", { href: "#/job/" + c.src_job_id }, `job IS #${c.src_job_id}`),
+    h("p", {}, `OS1 của biến thể run ${c.src_run_id} trong `, h("a", { href: `#/job/${c.src_job_id}/run/${c.src_run_id}` }, `job IS #${c.src_job_id}`),
       ` · ${c.symbol || ""} · ${c.period || ""} · chạy liền ${c.fromdate} → ${c.todate}, chỉ hiển thị phần từ 2024.01.01`),
     h("p", { class: "mono muted" }, pr || "-"),
     job.status === "done" ? h("div", { class: "card" },
@@ -657,7 +657,7 @@ async function pageIsPass(main, page) {
       const key = v.job_id + ":" + v.run_id;
       const cb = h("input", { type: "checkbox", disabled: !can, on: { change: (e) => { if (e.target.checked) sel.set(key, { job_id: v.job_id, run_id: v.run_id }); else sel.delete(key); upBtn(); } } });
       const keys = v.opt_keys && v.opt_keys.length ? v.opt_keys : Object.keys(v.params);
-      return h("tr", {}, h("td", {}, cb), h("td", {}, h("a", { href: "#/job/" + v.job_id }, "#" + v.job_id), h("span", { class: "muted" }, " run " + v.run_id)),
+      return h("tr", {}, h("td", {}, cb), h("td", {}, h("a", { href: `#/job/${v.job_id}/run/${v.run_id}` }, "#" + v.job_id), h("span", { class: "muted" }, " run " + v.run_id)),
         h("td", { class: "mono" }, v.alpha), h("td", {}, v.symbol), h("td", {}, v.period),
         h("td", { class: "mono small" }, keys.map((k) => `${k}=${v.params[k]}`).join(" ")),
         h("td", { class: "n" }, fmt(v.sharpe, 3)), h("td", { class: "n" }, fmt(v.recent_sharpe, 3)), h("td", { class: "n" }, fmt(v.fitness, 3)),
@@ -735,7 +735,7 @@ function chart(points) {
   return svg;
 }
 
-async function pageJob(main, id) {
+async function pageJob(main, id, runId) {
   const holder = h("div");
   main.replaceChildren(holder);
   let viewer = null;
@@ -777,22 +777,11 @@ async function pageJob(main, id) {
       c.type === "offline" ? h("span", { class: "tag" }, "offline · " + (job.source || job.summary.source || "")) : null,
       h("span", { class: "mono" }, ver), h("span", { class: "muted", title: (job.summary.engine && job.summary.engine.commit) || "" }, eng),
       h("span", {}, `${job.summary.variants} run`)) : null;
-    if (job.status === "done" && !viewer) viewer = buildViewer(id, job);
+    if (job.status === "done" && !viewer) viewer = buildViewer(id, job, runId);
     main.classList.toggle("wide", job.status === "done");
     const doneNote = job.status === "done" && job.notice ? h("div", { class: "banner warnbox" }, job.notice) : null;
-    const adminBar = job.owner && slim ? h("div", { class: "vwbar" }, h("span", { class: "muted" }, `Tài khoản ${job.owner.slug}` + (job.deleted ? " · ĐÃ XÓA" : "")),
-      job.deletable ? h("button", { class: "btn danger", on: { click: async (ev) => {
-        if (!confirm(confirmDeleteText(1))) return;
-        ev.target.disabled = true;
-        const r = await api(`/api/jobs/${id}/delete`, {});
-        if (r.ok) location.hash = "#/admin/jobs"; else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
-      } } }, "Xóa report này") : null) : null;
-    const ownBar = !job.owner && slim && job.deletable ? h("div", { class: "vwbar" }, h("button", { class: "btn danger", on: { click: async (ev) => {
-        if (!confirm(confirmDeleteText(1))) return;
-        ev.target.disabled = true;
-        const r = await api(`/api/jobs/${id}/delete`, {});
-        if (r.ok) location.hash = "#/jobs"; else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
-      } } }, "Xóa report này")) : null;
+    const adminBar = job.owner && slim ? h("div", { class: "vwbar" }, h("span", { class: "muted" }, `Tài khoản ${job.owner.slug}` + (job.deleted ? " · ĐÃ XÓA" : ""))) : null;
+    const ownBar = null;
     holder.replaceChildren(...[c.type === "os1" && job.status === "done" ? head : (slim || head), adminBar, ownBar, doneNote, job.status === "done" ? viewer : null].filter(Boolean));
     if (!live) clearTimers();
   }
@@ -819,34 +808,130 @@ const METRIC_NAMES = ["net_profit", "custom_sharpe", "fitness", "profit_factor",
   "os_pass", "os_sharpe", "is_sharpe", "os_profit", "os_new_high", "os_no_new_dd", "os_max_dd", "is_max_dd", "os_dd_pct",
   "os_trades", "os_winrate", "os_profit_factor", "os_gross_profit", "os_gross_loss", "os_days", "os_note"];
 
-function drawEquity(canvas, pts) {
-  // vẽ theo kích thước hiển thị thật x độ nét màn hình (điện thoại, Z Fold gập/mở)
-  canvas._pts = pts;
-  const dpr = window.devicePixelRatio || 1;
-  const W = canvas.clientWidth || 900, H = canvas.clientHeight || 300, pad = W < 480 ? 30 : 38;
+const shortNum = (v) => {
+  const a = Math.abs(v), f = (x, d) => (+x.toFixed(d)).toLocaleString("en-US");
+  if (a >= 1e9) return f(v / 1e9, a >= 1e10 ? 1 : 2) + "B";
+  if (a >= 1e6) return f(v / 1e6, a >= 1e7 ? 1 : 2) + "M";
+  if (a >= 1e4) return f(v / 1e3, 0) + "k";
+  if (a >= 1e3) return f(v / 1e3, 1) + "k";
+  return f(v, 2);
+};
+function niceStep(range, n) {
+  const raw = range / Math.max(1, n), p = Math.pow(10, Math.floor(Math.log10(raw || 1))), f = raw / p;
+  return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
+}
+const dkeyOf = (d) => String(d || "").replace(/\D/g, "").slice(0, 8);
+
+// Vẽ equity (xanh) + balance (xám), lưới theo mốc "đẹp", trục thời gian theo năm/tháng, tô đoạn max drawdown.
+// opts: { maxdd: {peak_date, trough_date, amount, pct} (data-server tính trên toàn bộ điểm), W, H (kích thước cố định khi xuất file) }
+function drawEquity(canvas, pts, opts) {
+  canvas._pts = pts; canvas._opts = opts || null;
+  const fixed = !!(opts && opts.W);
+  const dpr = fixed ? 2 : (window.devicePixelRatio || 1);
+  const W = fixed ? opts.W : (canvas.clientWidth || 900), H = fixed ? opts.H : (canvas.clientHeight || 300);
+  const small = W < 520, L = small ? 48 : 66, R = 12, T = 26, B = 30;
   if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) { canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); }
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "#fbfcfd"; ctx.fillRect(0, 0, W, H);
-  ctx.font = "12px Segoe UI";
+  ctx.font = (small ? "10px" : "11px") + " Segoe UI, Arial";
   if (!pts.length) { ctx.fillStyle = "#68717d"; ctx.fillText("Không có dữ liệu equity", 20, 30); return; }
-  const vals = pts.map((r) => Number(r[2]));
-  const lo = Math.min(...vals), hi = Math.max(...vals), sp = hi - lo || 1;
-  ctx.strokeStyle = "#d9dee5"; ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) { const y = pad + (H - pad * 2) * i / 4; ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke(); }
-  ctx.strokeStyle = "#116a7b"; ctx.lineWidth = 2; ctx.beginPath();
-  pts.forEach((r, i) => {
-    const x = pad + (W - pad * 2) * i / Math.max(1, pts.length - 1), y = H - pad - (Number(r[2]) - lo) / sp * (H - pad * 2);
-    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-  });
-  ctx.stroke();
-  ctx.fillStyle = "#68717d";
-  ctx.fillText(`max ${vfmt(hi, 2)}`, pad, 18); ctx.fillText(`min ${vfmt(lo, 2)}`, pad, H - 10);
-  ctx.fillText(String(pts[0][0]), Math.max(pad + 90, W - pad - 170), H - 10); ctx.textAlign = "right"; ctx.fillText(String(pts[pts.length - 1][0]), W - pad, H - 10); ctx.textAlign = "left";
+  const eq = pts.map((r) => Number(r[2] ?? r[1])), bal = pts.map((r) => Number(r[1] ?? r[2]));
+  let lo = Math.min(...eq, ...bal), hi = Math.max(...eq, ...bal);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const step = niceStep(hi - lo, small ? 5 : 8);
+  const y0 = Math.floor(lo / step) * step, y1 = Math.ceil(hi / step) * step;
+  const pw = W - L - R, ph = H - T - B;
+  const X = (i) => L + pw * i / Math.max(1, pts.length - 1), Y = (v) => T + ph - (v - y0) / (y1 - y0) * ph;
+  // lưới + nhãn trục tung (đơn vị chung k/M/B, số lẻ đủ để các mốc khác nhau)
+  const amax = Math.max(Math.abs(y0), Math.abs(y1));
+  const [div, suf] = amax >= 1e9 ? [1e9, "B"] : amax >= 1e6 ? [1e6, "M"] : amax >= 1e4 ? [1e3, "k"] : [1, ""];
+  const dec = Math.max(0, Math.min(4, -Math.floor(Math.log10(step / div) + 1e-9)));
+  const tickLabel = (v) => (v / div).toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec }) + suf;
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let v = y0; v <= y1 + step / 2; v += step) {
+    const y = Math.round(Y(v)) + 0.5;
+    ctx.strokeStyle = Math.abs(v) < step / 2 ? "#9aa4b2" : "#e3e7ec"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
+    ctx.fillStyle = "#68717d"; ctx.fillText(tickLabel(v), L - 6, y);
+  }
+  // trục hoành: mốc năm (hoặc tháng khi khoảng ngắn), tối đa ~10-14 mốc
+  const keys = pts.map((r) => dkeyOf(r[0]));
+  const y0d = +keys[0].slice(0, 4), y1d = +keys[keys.length - 1].slice(0, 4);
+  const maxTicks = Math.max(3, Math.min(14, Math.floor(pw / (small ? 42 : 40))));
+  const marks = [];
+  if (y1d - y0d >= 3) {
+    const every = [1, 2, 5, 10].find((e) => (y1d - y0d) / e <= maxTicks) || 10;
+    for (let y = Math.ceil(y0d / every) * every; y <= y1d; y += every) marks.push([String(y) + "0101", String(y)]);
+  } else {
+    const months = (y1d - y0d) * 12 + (+keys[keys.length - 1].slice(4, 6)) - (+keys[0].slice(4, 6)) + 1;
+    const every = [1, 2, 3, 6, 12].find((e) => months / e <= maxTicks) || 12;
+    for (let k = 0; k <= months; k++) {
+      const m0 = +keys[0].slice(4, 6) - 1 + k, yy = y0d + Math.floor(m0 / 12), mm = (m0 % 12) + 1;
+      if ((mm - 1) % every === 0) marks.push([`${yy}${String(mm).padStart(2, "0")}01`, `${yy}-${String(mm).padStart(2, "0")}`]);
+    }
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  let lastX = -1e9, idx = 0;
+  for (const [key, label] of marks) {
+    while (idx < keys.length && keys[idx] < key) idx++;
+    if (idx >= keys.length) break;
+    const x = Math.round(X(idx)) + 0.5;
+    ctx.strokeStyle = "#eef1f4"; ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
+    ctx.strokeStyle = "#9aa4b2"; ctx.beginPath(); ctx.moveTo(x, T + ph); ctx.lineTo(x, T + ph + 4); ctx.stroke();
+    if (x - lastX > (small ? 34 : 44)) { ctx.fillStyle = "#68717d"; ctx.fillText(label, x, T + ph + 7); lastX = x; }
+  }
+  ctx.strokeStyle = "#9aa4b2"; ctx.beginPath(); ctx.moveTo(L, T + ph + 0.5); ctx.lineTo(W - R, T + ph + 0.5); ctx.stroke();
+  // đoạn max drawdown (đỉnh -> đáy)
+  let md = opts && opts.maxdd, pi = -1, ti = -1;
+  if (md && md.peak_date) {
+    const pk = dkeyOf(md.peak_date), tk = dkeyOf(md.trough_date);
+    pi = keys.findIndex((k) => k >= pk); ti = keys.findIndex((k) => k >= tk);
+  }
+  if (pi < 0 || ti < 0) {      // không có số liệu chính xác: tính trên các điểm đang có
+    let p = 0, best = 0; pi = ti = -1;
+    eq.forEach((v, i) => { if (v > eq[p]) p = i; else if (eq[p] - v > best) { best = eq[p] - v; pi = p; ti = i; } });
+    md = best > 0 ? { amount: best, pct: eq[pi] ? 100 * best / eq[pi] : null } : null;
+  }
+  if (md && pi >= 0 && ti > pi) {
+    ctx.fillStyle = "rgba(180,35,24,0.08)"; ctx.fillRect(X(pi), T, Math.max(2, X(ti) - X(pi)), ph);
+  }
+  const line = (vals, col, w, from = 0, to = vals.length - 1) => {
+    ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineJoin = "round"; ctx.beginPath();
+    for (let i = from; i <= to; i++) { const x = X(i), y = Y(vals[i]); i === from ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.stroke();
+  };
+  line(bal, "#a7b0bc", 1.2);
+  line(eq, "#1f6feb", 1.8);
+  if (md && pi >= 0 && ti > pi) {
+    line(eq, "#b42318", 2.4, pi, ti);
+    const dot = (i, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(X(i), Y(eq[i]), 3.5, 0, Math.PI * 2); ctx.fill(); };
+    dot(pi, "#147a43"); dot(ti, "#b42318");
+    const txt = `Max DD -${shortNum(md.amount)}` + (md.pct != null ? ` (${(+md.pct).toFixed(1)}%)` : "") +
+      `  ${String(pts[pi][0])} → ${String(pts[ti][0])}`;
+    ctx.font = "bold " + ctx.font; ctx.fillStyle = "#b42318"; ctx.textBaseline = "top";
+    const tw = ctx.measureText(txt).width, tx = Math.min(Math.max(L + 4, X(ti) - tw / 2), W - R - tw - 2);
+    const ty = Math.min(T + ph - 16, Y(eq[ti]) + 8);
+    ctx.textAlign = "left"; ctx.fillStyle = "rgba(251,252,253,0.85)"; ctx.fillRect(tx - 3, ty - 2, tw + 6, 16);
+    ctx.fillStyle = "#b42318"; ctx.fillText(txt, tx, ty);
+    ctx.font = (small ? "10px" : "11px") + " Segoe UI, Arial";
+  }
+  // chú thích
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const leg = [["#1f6feb", "Equity"], ["#a7b0bc", "Balance"], ["#b42318", "Max drawdown"]];
+  let lx = L;
+  for (const [col, name] of leg) { ctx.fillStyle = col; ctx.fillRect(lx, 9, 14, 3); ctx.fillStyle = "#4b5563"; ctx.fillText(name, lx + 18, 11); lx += 26 + ctx.measureText(name).width + 12; }
 }
 
-function buildViewer(id, job) {
+const runLink = (jobId, runId) => `${location.origin}/#/job/${jobId}/run/${runId}`;
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch { /* trình duyệt chặn: hiện để tự chép */ }
+  prompt("Sao chép link:", t);
+  return false;
+}
+
+function buildViewer(id, job, initRun) {
   const c = job.config;
   const optKeys = new Set(Object.entries(c.params || {}).filter(([, v]) => v[1] > 0).map(([k]) => vkey(k)));
   const S = { sort: "fitness", dir: "desc", pass: false, traded: false, q: "", symbol: "", offset: 0, sel: null, rows: [], total: 0, page: 100, token: 0 };
@@ -906,6 +991,13 @@ function buildViewer(id, job) {
     S.rows = r.rows; S.total = r.total; S.page = r.page;
     if (symSel.options.length === 1 && (r.symbols || []).length > 1) { symSel.append(...r.symbols.map((x) => h("option", { value: x }, x))); symWrap.style.display = ""; }
     renderRuns();
+    if (S.sel === null && initRun != null) {
+      const want = initRun; initRun = null;
+      let v = S.rows.find((x) => x.run_id === want);
+      if (!v) { const f = await api(`/api/jobs/${id}/variants?q=${want}`); v = (f.rows || []).find((x) => x.run_id === want); }
+      if (v) { selectRun(v); return; }
+      runSub.textContent = `Không có run ${want} trong job này.`;
+    }
     if (S.sel === null && S.rows.length) selectRun(S.rows[0]);
   }
 
@@ -923,7 +1015,17 @@ function buildViewer(id, job) {
   async function selectRun(v) {
     S.sel = v.run_id; const tok = ++S.token;
     renderRuns();
-    runTitle.textContent = `${v.symbol} ${c.period} | run ${v.run_id}`;
+    const want = `#/job/${id}/run/${v.run_id}`;
+    if (location.hash !== want && location.hash.startsWith(`#/job/${id}`)) history.replaceState(null, "", want);
+    const cp = h("button", { class: "btn small", title: "Link mở thẳng run này (người xem cần đăng nhập và có quyền xem job)", on: { click: async (ev) => {
+      const ok = await copyText(runLink(id, v.run_id)); if (ok) { ev.target.textContent = "Đã chép link"; setTimeout(() => { ev.target.textContent = "Sao chép link"; }, 1500); } } } }, "Sao chép link");
+    const ex = h("button", { class: "btn small", disabled: true, title: "Tải báo cáo HTML của run này (mở offline được)", on: { click: async (ev) => {
+      ev.target.disabled = true; const old = ev.target.textContent; ev.target.textContent = "Đang tạo…";
+      try { await exportRunHtml(); } catch (e) { alert("Không tạo được file: " + e); }
+      ev.target.textContent = old; ev.target.disabled = false; } } }, "Export HTML");
+    S.exportBtn = ex; S.cur = { v };
+    runTitle.replaceChildren(`${v.symbol} ${c.period} | run ${v.run_id} `, cp, " ", ex);
+    codeBtn.disabled = false; codeBtn.onclick = () => toggleCode(v.run_id);
     runSub.textContent = `${job.alpha} | job #${id}`;
     tradeBtn.disabled = false; tradeBox.replaceChildren(); tradePager.replaceChildren(); tradeInfo.textContent = "";
     tradeBtn.onclick = () => loadTrades(v.run_id, 0);
@@ -943,12 +1045,113 @@ function buildViewer(id, job) {
       if (String(tt.symbol || "").toUpperCase().startsWith("PORTFOLIO") && (c.symbols || []).length) tt.symbol = c.symbols.join(", ");
       testerBox.replaceChildren(...vkv(tt));
       metricsBox.replaceChildren(...vkv(Object.fromEntries(METRIC_NAMES.filter((n) => m[n] !== undefined).map((n) => [n, m[n]]))));
+      Object.assign(S.cur, { det, items, tester: tt });
     } else {
       cards.replaceChildren(h("p", { class: "err" }, (det && det.error) || "Không lấy được chi tiết (data-server offline?)"));
     }
-    if (eq && eq.ok) { drawEquity(canvas, eq.points); eqInfo.textContent = `${eq.points.length}/${eq.total_points} points`; }
+    if (eq && eq.ok) { drawEquity(canvas, eq.points, { maxdd: eq.max_dd }); eqInfo.textContent = `${eq.points.length}/${eq.total_points} points`; }
     else { drawEquity(canvas, []); eqInfo.textContent = (eq && eq.error) || "Không có equity"; }
     st.textContent = "";
+    if (S.cur && S.cur.v === v) { S.cur.eq = eq && eq.ok ? eq : null; if (S.cur.det && S.exportBtn) S.exportBtn.disabled = false; }
+  }
+
+  // ---- mã alpha (đúng bản đã chạy job này; data-server gửi khi bấm, web không lưu) ----
+  const codeBtn = h("button", { class: "btn", disabled: true }, "Show code");
+  const codeInfo = h("span", { class: "muted" });
+  const codeBox = h("div", {});
+  async function getCode(runId) {
+    if (S.code) return S.code;
+    const r = await requestData(id, "code", runId, 0, codeInfo);
+    if (!r) return null;
+    if (!r.ok) { codeInfo.textContent = r.error || "Lỗi"; return null; }
+    S.code = r;
+    return r;
+  }
+  async function toggleCode(runId) {
+    if (codeBox.firstChild) { codeBox.replaceChildren(); codeBtn.textContent = "Show code"; return; }
+    codeBtn.disabled = true;
+    const r = await getCode(runId);
+    codeBtn.disabled = false;
+    if (!r) return;
+    codeInfo.textContent = `${r.name || job.alpha}.rs · ${(r.bytes / 1000).toFixed(1)} KB · ${r.code.split("\n").length} dòng`;
+    const copyBtn = h("button", { class: "btn small", on: { click: async (ev) => { if (await copyText(r.code)) { ev.target.textContent = "Đã chép"; setTimeout(() => { ev.target.textContent = "Sao chép mã"; }, 1500); } } } }, "Sao chép mã");
+    codeBox.replaceChildren(h("div", { class: "pager" }, copyBtn), h("pre", { class: "vwcode" }, r.code));
+    codeBtn.textContent = "Hide code";
+  }
+
+  // ---- xuất HTML cho run đang chọn (theo bố cục báo cáo của Rust Quant Viewer offline) ----
+  async function exportRunHtml() {
+    const cur = S.cur || {};
+    const v = cur.v, det = cur.det;
+    if (!v || !det) throw new Error("chưa tải xong chi tiết run");
+    const code = await getCode(v.run_id);
+    const esc = (x) => String(x ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    const kv = (o) => Object.entries(o || {}).map(([k, x]) => `<div class="kvRow"><span>${esc(k)}</span><strong>${esc(typeof x === "number" ? vfmt(x) : x)}</strong></div>`).join("");
+    const cardsHtml = (cur.items || []).map(([l, x, sg]) => `<div class="card"><span>${esc(l)}</span><strong class="${sg ? (Number(x) > 0 ? "positive" : Number(x) < 0 ? "negative" : "") : ""}">${esc(vfmt(x))}</strong></div>`).join("");
+    let img = "";
+    if (cur.eq && cur.eq.points && cur.eq.points.length) {
+      const cv = document.createElement("canvas");
+      drawEquity(cv, cur.eq.points, { maxdd: cur.eq.max_dd, W: 1100, H: 400 });
+      img = `<img alt="Daily equity" src="${cv.toDataURL("image/png")}">`;
+    }
+    const md = cur.eq && cur.eq.max_dd;
+    const mdText = md ? `Max drawdown: -${vfmt(md.amount, 2)}${md.pct != null ? ` (${(+md.pct).toFixed(2)}%)` : ""}, từ ${md.peak_date} đến ${md.trough_date}` : "";
+    const jobCfg = { job: `#${id}`, type: c.type, alpha: job.alpha, symbols_mode: c.symbols_mode,
+      symbols: (c.symbols || []).join(", "), period: c.period, fromdate: c.fromdate, todate: c.todate, deposit: c.deposit,
+      leverage: c.leverage, swap_mode: c.swap_mode, lot: c.lot, commission_per_trade: c.commission_per_trade,
+      engine: job.summary ? engineText(job.summary.engine) : "", report: job.summary ? String(job.summary.report || "").split(/[\/\\]/).pop() : "" };
+    const grid = Object.entries(c.params || {}).map(([k, x]) => `${k} = ${Array.isArray(x) ? x.join(", ") : x}`).join("\n");
+    const title = `${v.symbol} ${c.period} | run ${v.run_id}`;
+    const sub = `${job.alpha} | job #${id}` + (jobCfg.report ? ` | ${jobCfg.report}` : "");
+    const docHtml = `<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)} - QuanTechCap Report</title>
+<style>
+:root{--bg:#f5f6f8;--panel:#fff;--text:#1e2329;--muted:#68717d;--line:#d9dee5;--accent:#116a7b;--good:#147a43;--bad:#b42318}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",Arial,sans-serif}
+h1,h2,p{margin:0}h1{font-size:21px}h2{font-size:14px}
+.report{display:grid;grid-template-columns:minmax(520px,1fr) 340px;gap:12px;padding:12px}
+.content,.detail{display:flex;flex-direction:column;gap:12px;min-width:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0;box-shadow:0 1px 2px #14191e12}
+.panelHead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.panelHead span,.sub{color:var(--muted);font-size:12px}
+.cards{display:grid;grid-template-columns:repeat(5,minmax(100px,1fr));gap:8px;margin-top:12px}
+.card{border:1px solid var(--line);border-radius:6px;padding:8px}.card span{display:block;color:var(--muted);font-size:11px}.card strong{font-size:18px}
+.positive{color:var(--good)}.negative{color:var(--bad)}
+.chart img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:6px;background:#fbfcfd}
+.kv{max-height:420px;overflow:auto}
+.kvRow{display:grid;grid-template-columns:minmax(90px,1fr) auto;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:12px}
+.kvRow span{color:var(--muted)}.kvRow strong{max-width:280px;overflow-wrap:anywhere;text-align:right}
+details{margin-top:10px}summary{cursor:pointer;color:var(--accent);font-weight:650}
+pre{max-height:520px;overflow:auto;padding:10px;border:1px solid var(--line);border-radius:6px;background:#fbfcfd;white-space:pre;font:12px/1.45 Consolas,monospace;tab-size:4}
+.foot{color:var(--muted);font-size:11px;padding:0 12px 12px}
+@media(max-width:980px){.report{display:block}.detail{margin-top:12px}.cards{grid-template-columns:repeat(2,1fr)}}
+@media print{body{background:#fff}.report{padding:0}.panel{break-inside:avoid;box-shadow:none}pre{max-height:none}}
+</style></head><body>
+<main class="report">
+<section class="content">
+<section class="panel"><div class="panelHead"><div><h1>${esc(title)}</h1><p class="sub">${esc(sub)}</p></div></div><div class="cards">${cardsHtml}</div></section>
+<section class="panel"><div class="panelHead"><h2>Daily Equity</h2><span>${esc(cur.eq ? `${cur.eq.points.length}/${cur.eq.total_points} points` : "")}</span></div><div class="chart">${img}</div><p class="sub" style="margin-top:6px">${esc(mdText)}</p></section>
+<section class="panel"><div class="panelHead"><h2>Job</h2><span>${esc("QuanTechCap research")}</span></div><div class="kv">${kv(jobCfg)}</div>
+<details><summary>Lưới tham số (start, step, stop)</summary><pre>${esc(grid)}</pre></details>
+${code ? `<details open><summary>Alpha source (${esc(code.name || job.alpha)}.rs)</summary><pre>${esc(code.code)}</pre></details>` : "<p class=\"sub\">Không lấy được mã alpha.</p>"}
+</section>
+</section>
+<aside class="detail">
+<section class="panel"><h2>Inputs</h2><div class="kv">${kv(det.parameters)}</div></section>
+<section class="panel"><h2>Tester</h2><div class="kv">${kv(cur.tester || det.tester)}</div></section>
+<section class="panel"><h2>Metrics</h2><div class="kv">${kv(Object.fromEntries(METRIC_NAMES.filter((n) => det.metrics[n] !== undefined).map((n) => [n, det.metrics[n]])))}</div></section>
+</aside>
+</main>
+<p class="foot">Xuất từ QuanTechCap lúc ${esc(new Date().toISOString().replace("T", " ").slice(0, 19))} UTC. Tài liệu nghiên cứu nội bộ, không phải khuyến nghị đầu tư.</p>
+</body></html>`;
+    const now = new Date(), p2 = (n) => String(n).padStart(2, "0");
+    const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}_${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
+    const fname = `report_${String(job.alpha).replace(/[^A-Za-z0-9_-]+/g, "_")}_job${id}_run_${v.run_id}_${stamp}.html`;
+    const url = URL.createObjectURL(new Blob([docHtml], { type: "text/html;charset=utf-8" }));
+    const a = h("a", { href: url, download: fname });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
   async function loadTrades(runId, offset) {
@@ -977,7 +1180,16 @@ function buildViewer(id, job) {
     h("section", { class: "vwmain" },
       h("section", { class: "vwp" }, h("div", { class: "vwhead" }, h("div", {}, runTitle, runSub)), cards),
       h("section", { class: "vwp" }, h("div", { class: "vwhead" }, h("h3", {}, "Daily Equity"), eqInfo), canvas),
-      h("section", { class: "vwp" }, h("div", { class: "vwhead" }, h("h3", {}, "Trades Preview"), h("div", {}, tradeInfo, " ", tradeBtn)), tradeBox, tradePager)),
+      h("section", { class: "vwp" }, h("div", { class: "vwhead" }, h("h3", {}, "Trades Preview"), h("div", {}, tradeInfo, " ", tradeBtn)), tradeBox, tradePager),
+      h("section", { class: "vwp" }, h("div", { class: "vwhead" }, h("h3", {}, "Alpha code"), h("div", {}, codeInfo, " ", codeBtn)),
+        h("p", { class: "muted small" }, "Mã alpha đúng bản đã chạy job này (bản chép trong report trên data-server)."), codeBox),
+      job.deletable ? h("section", { class: "vwp" }, h("button", { class: "btn danger", on: { click: async (ev) => {
+        if (!confirm(confirmDeleteText(1))) return;
+        ev.target.disabled = true;
+        const r = await api(`/api/jobs/${id}/delete`, {});
+        if (r.ok) location.hash = job.owner && job.owner.slug !== ST.slug ? "#/admin/jobs" : "#/jobs";
+        else { ev.target.disabled = false; alert(r.error || "Không xóa được"); }
+      } } }, "Xóa report này")) : null),
     h("aside", { class: "vwdet" }, vpanel("Inputs", inputsBox), vpanel("Tester", testerBox), vpanel("Metrics", metricsBox)));
   drawEquity(canvas, []);
   loadRuns().catch((e) => runList.replaceChildren(h("p", { class: "err" }, String(e))));
@@ -1014,5 +1226,5 @@ new MutationObserver(() => {
 let _rsz = null;
 window.addEventListener("resize", () => {
   clearTimeout(_rsz);
-  _rsz = setTimeout(() => document.querySelectorAll("canvas.vwc").forEach((c) => { if (c._pts) drawEquity(c, c._pts); }), 150);
+  _rsz = setTimeout(() => document.querySelectorAll("canvas.vwc").forEach((c) => { if (c._pts) drawEquity(c, c._pts, c._opts); }), 150);
 });

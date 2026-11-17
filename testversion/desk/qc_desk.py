@@ -686,6 +686,7 @@ def collect_variants(run_dir: Path):
 RUN_WAIT_MAX_MIN = 240          # chờ run khác (của web hoặc ngoài web) tối đa 4 giờ
 START_RETRIES = 4               # số lần thử khởi động lại khi tiến trình run thoát sớm
 STALL_WARN_MIN = 30             # không thấy tiến độ mới quá 30 phút -> ghi chú cho trader
+CPU_CAP_OS1 = int(CFG.get("cpu_cap_os1", 80))   # tài khoản loại 2 (os1_access): giới hạn CPU 80% (Dương 2026-11-17); còn lại 50%
 MAX_CONTINUES = 3               # run dừng giữa chừng -> tự chạy tiếp (giữ symbol đã xong) tối đa 3 lần mỗi job
 _PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"]+")
 
@@ -791,6 +792,7 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
     env = dict(os.environ, RQ_ROOT=RQ_ROOT, TRADER_DIR=str(t["dir"]), TRADER_NAME=t["name"])
     timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
     t0 = t0 or time.time()
+    cap_args = ["--cpu-cap", str(CPU_CAP_OS1)] if t.get("os1_access") else []
 
     def launch(cmd):
         """Chạy rq_run (chờ khi run khác giữ giới hạn CPU). Trả về file trạng thái, hoặc None nếu đã báo lỗi/hủy."""
@@ -819,6 +821,15 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
                              "Hãy chạy lại sau ít phút; nếu vẫn lỗi, báo quản trị kèm số job.")
                         return None
                     continue
+                if not out.strip():                # rq_run thoát không in gì (Windows không khởi tạo được tiến trình...)
+                    starts += 1
+                    log(f"job {jid}: rq_run thoát không có thông báo (mã {r.returncode}), thử lại lần {starts}")
+                    if starts >= START_RETRIES:
+                        fail("Data-server không khởi động được run sau nhiều lần thử. "
+                             "Hãy chạy lại sau ít phút; nếu vẫn lỗi, báo quản trị kèm số job.")
+                        return None
+                    time.sleep(5)
+                    continue
                 if "BUSY" not in out:
                     fail("Data-server từ chối chạy: " + _PATH_RE.sub("<đường dẫn>", out.strip()[-300:]))
                     return None
@@ -830,7 +841,7 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
             time.sleep(20)
 
     def continue_cmd(run_id):
-        return [PY, str(TOOLS / "rq_run.py"), "--continue-run", run_id, "--timeout-min", str(timeout_min)]
+        return [PY, str(TOOLS / "rq_run.py"), "--continue-run", run_id, "--timeout-min", str(timeout_min)] + cap_args
 
     tries = 0
     if attach:
@@ -843,7 +854,7 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
         else:
             upd(jid, status="running", message="Data-server đã nhận job, đang chuẩn bị chạy", progress=0)
             cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
-                   "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"]
+                   "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"] + cap_args
             if smoke:
                 cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
         status_path = launch(cmd)
@@ -1235,6 +1246,18 @@ def handle_request(req):
         roots = [t["dir"]] + ([x["root"] for x in IMPORTS if x["slug"] == slug] if entry.get("kind") == "offline" else [])
         if not any(r == run_dir or r in run_dir.parents for r in roots):
             raise ValueError("đường dẫn không hợp lệ")
+        if kind == "code":
+            # mã alpha ĐÚNG bản đã chạy (bản chép trong report); chỉ trader sở hữu job (hoặc admin) xin được, web không lưu lại
+            src = run_dir / "alpha.rs"
+            if not src.is_file():
+                raise ValueError("report không còn bản mã alpha")
+            raw = src.read_bytes()
+            if len(raw) > 400_000:
+                raise ValueError("mã alpha quá lớn để hiển thị (> 400 KB)")
+            res = {"ok": True, "name": entry.get("alpha") or run_dir.parent.name, "bytes": len(raw),
+                   "code": _PATH_RE.sub("<đường dẫn>", raw.decode("utf-8", errors="replace"))}
+            api("POST", f"/api/desk/requests/{rid}/result", res, timeout=60)
+            return
         db = run_dir / "data" / "results.sqlite"
         os1 = entry.get("kind") == "os1"
         os1_info = os1_index().get(str(jid), {}) if os1 else {}
@@ -1297,11 +1320,28 @@ def handle_request(req):
             rows = con.execute("select date,balance,equity,drawdown from daily_equity where run_id=? and date>=? order by date",
                                (run_id, d_from)).fetchall()
             n = len(rows)
+            # đoạn max drawdown của equity, tính trên TOÀN BỘ điểm (không phải bản lấy mẫu)
+            mdd, peak_i, best = None, 0, (0.0, 0, 0)
+            for i, r in enumerate(rows):
+                eq = r[2] if r[2] is not None else r[1]
+                if eq is None:
+                    continue
+                pk = rows[peak_i][2] if rows[peak_i][2] is not None else rows[peak_i][1]
+                if pk is None or eq > pk:
+                    peak_i = i
+                elif pk - eq > best[0]:
+                    best = (pk - eq, peak_i, i)
+            if best[0] > 0:
+                pr, tr = rows[best[1]], rows[best[2]]
+                pk = pr[2] if pr[2] is not None else pr[1]
+                mdd = {"peak_date": pr[0], "peak": clean(pk), "trough_date": tr[0],
+                       "trough": clean(tr[2] if tr[2] is not None else tr[1]), "amount": clean(best[0]),
+                       "pct": clean(100.0 * best[0] / pk) if pk else None}
             step = max(1, n // 600)
-            pts = rows[::step]
-            if rows and pts[-1] != rows[-1]:
-                pts.append(rows[-1])
-            res = {"ok": True, "total_points": n, "points": [[r[0], clean(r[1]), clean(r[2]), clean(r[3])] for r in pts]}
+            keep = set(range(0, n, step)) | ({n - 1} if n else set()) | ({best[1], best[2]} if mdd else set())
+            pts = [rows[i] for i in sorted(keep)]
+            res = {"ok": True, "total_points": n, "max_dd": mdd,
+                   "points": [[r[0], clean(r[1]), clean(r[2]), clean(r[3])] for r in pts]}
         else:
             raise ValueError("kind không hỗ trợ")
         con.close()
