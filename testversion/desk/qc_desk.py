@@ -687,6 +687,8 @@ RUN_WAIT_MAX_MIN = 240          # chờ run khác (của web hoặc ngoài web) 
 START_RETRIES = 4               # số lần thử khởi động lại khi tiến trình run thoát sớm
 STALL_WARN_MIN = 30             # không thấy tiến độ mới quá 30 phút -> ghi chú cho trader
 CPU_CAP_OS1 = int(CFG.get("cpu_cap_os1", 80))   # tài khoản loại 2 (os1_access): giới hạn CPU 80% (Dương 2026-11-17); còn lại 50%
+RUN_TIMEOUT_MIN = float(CFG.get("run_timeout_min", 200))          # loại 1: run optimize tối đa 200 phút
+RUN_TIMEOUT_OS1_MIN = float(CFG.get("run_timeout_os1_min", 0))   # loại 2 (os1_access): 0 = không giới hạn (Dương 2026-11-18)
 MAX_CONTINUES = 3               # run dừng giữa chừng -> tự chạy tiếp (giữ symbol đã xong) tối đa 3 lần mỗi job
 _PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"]+")
 
@@ -790,7 +792,7 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
     attach=<file trạng thái>: run vẫn đang chạy (desk vừa khởi động lại) -> chỉ theo dõi tiếp.
     Run chết giữa chừng -> tự chạy tiếp, tối đa MAX_CONTINUES lần."""
     env = dict(os.environ, RQ_ROOT=RQ_ROOT, TRADER_DIR=str(t["dir"]), TRADER_NAME=t["name"])
-    timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
+    timeout_min = SMOKE_TIMEOUT_MIN if smoke else (RUN_TIMEOUT_OS1_MIN if t.get("os1_access") else RUN_TIMEOUT_MIN)
     t0 = t0 or time.time()
     cap_args = ["--cpu-cap", str(CPU_CAP_OS1)] if t.get("os1_access") else []
 
@@ -855,6 +857,8 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
             upd(jid, status="running", message="Data-server đã nhận job, đang chuẩn bị chạy", progress=0)
             cmd = [PY, str(TOOLS / "rq_run.py"), "--alpha", str(alpha_path), "--input", str(ini),
                    "--report", str(t["dir"] / "report" / alpha), "--tag", f"web{jid}"] + cap_args
+            if not smoke:
+                cmd += ["--timeout-min", str(timeout_min)]
             if smoke:
                 cmd += ["--smoke", "--timeout-min", str(SMOKE_TIMEOUT_MIN)]
         status_path = launch(cmd)
@@ -908,7 +912,8 @@ def monitor_job(jid, slug, t, status_path, t0, timeout_min):
             msg = nice_progress(txt)
             stall = (time.time() - pct_at) / 60
             if stall >= STALL_WARN_MIN:
-                msg += f" · chưa có tiến độ mới trong {stall:.0f} phút (run sẽ tự dừng nếu quá {timeout_min:g} phút)"
+                msg += f" · chưa có tiến độ mới trong {stall:.0f} phút" + (
+                    f" (run sẽ tự dừng nếu quá {timeout_min:g} phút)" if timeout_min > 0 else "")
             resp = upd(jid, progress=pct or 0, message=msg[:300])
             if resp.get("cancel"):
                 pid = st.get("pid")
@@ -966,7 +971,7 @@ def recover_jobs():
         jid, slug = j["id"], j["slug"]
         t = TRADERS.get(slug)
         smoke = j.get("config", {}).get("type") == "smoke"
-        timeout_min = SMOKE_TIMEOUT_MIN if smoke else 200.0
+        timeout_min = SMOKE_TIMEOUT_MIN if smoke else (RUN_TIMEOUT_OS1_MIN if t and t.get("os1_access") else RUN_TIMEOUT_MIN)
         found = find_run_status(t, jid) if t else None
         if not found:
             log(f"nhận lại job {jid}: không có run -> lỗi")
