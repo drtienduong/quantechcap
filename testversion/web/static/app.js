@@ -43,7 +43,8 @@ function QC_LOGIN() {
     const err = document.getElementById("err");
     err.textContent = "";
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: document.getElementById("email").value, password: document.getElementById("pw").value }) });
+      body: JSON.stringify({ email: document.getElementById("email").value, password: document.getElementById("pw").value,
+        remember: !document.getElementById("remember") || document.getElementById("remember").checked }) });
     const j = await r.json();
     if (j.ok) location.href = "/" + (location.hash.startsWith("#/") ? location.hash : ""); else err.textContent = j.error || "Đăng nhập thất bại";
   });

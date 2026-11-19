@@ -57,7 +57,7 @@ SUB_CHECK_STALE_SEC = int(os.environ.get("QC_SUB_STALE_SEC", 180))   # bản n�
 JOB_STALE_SEC = int(os.environ.get("QC_JOB_STALE_SEC", 300))         # job không có cập nhật 5 phút khi data-server online -> lỗi
 DESK_STABLE_SEC = int(os.environ.get("QC_DESK_STABLE_SEC", 120))     # data-server online liên tục 2 phút mới xét mất theo dõi
 DEFAULTS = {"host": "127.0.0.1", "port": 8800, "desk_token": "", "secure_cookie": False,
-            "session_hours": 12, "limits": {}}
+            "session_hours": 12, "remember_days": 30, "limits": {}}
 MAX_BODY = 12 * 1024 * 1024
 DESK_ONLINE_SEC = 45
 REQUEST_TIMEOUT_SEC = 120
@@ -536,6 +536,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(400, "JSON không hợp lệ")
         email = str(body.get("email", "")).strip().lower()
         pw = str(body.get("password", ""))
+        remember = body.get("remember", True) is not False      # "Ghi nhớ đăng nhập trên máy này"
+        life = float(CFG.get("remember_days", 30)) * 86400 if remember else CFG["session_hours"] * 3600
         now = time.time()
         fails = [t for t in _login_fail.get(email, []) if now - t < 600]
         if len(fails) >= 5:
@@ -556,12 +558,12 @@ class Handler(BaseHTTPRequestHandler):
             con.execute("update users set last_login=? where id=?", (now_iso(), u["id"]))
             tok, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
             con.execute("insert into sessions(token,user_id,csrf,expires) values(?,?,?,?)",
-                        (tok, u["id"], csrf, now + CFG["session_hours"] * 3600))
+                        (tok, u["id"], csrf, now + life))
             con.execute("delete from sessions where expires < ?", (now,))
             con.commit()
         finally:
             con.close()
-        cookie = f"qc_session={tok}; Path=/; HttpOnly; SameSite=Strict; Max-Age={CFG['session_hours'] * 3600}"
+        cookie = f"qc_session={tok}; Path=/; HttpOnly; SameSite=Lax" + (f"; Max-Age={int(life)}" if remember else "")
         if CFG.get("secure_cookie"):
             cookie += "; Secure"
         self.send_json({"ok": True}, extra=[("Set-Cookie", cookie)])

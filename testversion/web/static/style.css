@@ -129,3 +129,5 @@ textarea.askbox{width:100%;font:inherit;padding:8px;border:1px solid var(--line)
 .vwcode{max-height:560px;overflow:auto;margin:0;padding:10px;border:1px solid #d9dee5;border-radius:6px;background:#fbfcfd;white-space:pre;font:12px/1.45 Consolas,monospace;tab-size:4}
 .vwc{height:340px}
 .vwhead h3 .btn{font-size:12px;font-weight:500;padding:3px 9px;margin-left:4px}
+.logincard label.chk{display:flex;align-items:center;gap:8px;font-weight:400}
+.logincard label.chk input{width:auto;margin:0}
