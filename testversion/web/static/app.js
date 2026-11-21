@@ -214,7 +214,7 @@ async function pageRun(main, name) {
   const f = {
     mode: h("select", {}, h("option", { value: "independent" }, "Từng symbol riêng"), h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)")),
     period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === ((a.meta && a.meta.required_period) || "H1") }, p))),
-    from: h("input", { type: "text", value: "2010.01.01", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
+    from: h("input", { type: "text", value: "0", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
     deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:1000", size: 7, title: "Tối đa 1:1000. Margin call 100%, stop-out 50%." }),
     swap: h("select", {}, h("option", { value: "zero" }, "zero (không swap)"), h("option", { value: "synthetic" }, "synthetic")),
     lot: h("input", { type: "number", value: 0.01, step: "any" }), pv: h("input", { type: "number", value: 100000 }),
@@ -233,18 +233,22 @@ async function pageRun(main, name) {
     const sel = boxes.filter((b) => b.checked).map((b) => SYM[b.value].start);
     return sel.length ? sel.reduce((m, x) => (dkey(x) < dkey(m) ? x : m)) : null;
   }
+  // Mặc định 0 = từ ngày đầu dữ liệu (Dương 2026-11-21): khi còn ở chế độ tự động, đổi symbol thì ngày bắt đầu đi theo
+  let autoFrom = true;
   function fixFrom() {
     const e = earliestStart();
     if (!e) return;
     const v = f.from.value.trim(), k = dkey(v);
-    if (v === "0" || (k.length === 8 && k < dkey(e))) {
+    if (v === "0" || autoFrom || (k.length === 8 && k < dkey(e))) {
+      autoFrom = true;
       f.from.value = e;
       fromHint.textContent = "Tự đặt = ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn";
     } else if (k.length === 8) fromHint.textContent = "";
   }
-  f.from.addEventListener("input", () => { if (f.from.value.trim() === "0") fixFrom(); });
+  f.from.addEventListener("input", () => { autoFrom = f.from.value.trim() === "0"; if (autoFrom) fixFrom(); });
   f.from.addEventListener("change", fixFrom);
   boxes.forEach((b) => b.addEventListener("change", fixFrom));
+  fixFrom();
   const setSyms = (list) => { boxes.forEach((b) => { b.checked = list.includes(b.value); }); fixFrom(); };
   const addSyms = (list) => { boxes.forEach((b) => { if (list.includes(b.value)) b.checked = true; }); fixFrom(); };
   const groupSyms = (g) => ST.symbols.filter((x) => x.group === g).map((x) => x.symbol);
