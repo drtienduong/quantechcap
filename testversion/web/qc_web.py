@@ -590,7 +590,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "alpha_suffix": alpha_suffix(s["slug"]), "kit": sorted(KIT_FILES),
                                        "os1_access": bool(s["os1_access"]), "is_admin": bool(s["is_admin"]),
                                        "can_delete": bool(s["os1_access"] or s["is_admin"]),
-                                       "todate_max": LIMITS["os1_end"] if s["os1_access"] else LIMITS["is_end"],
+                                       "todate_max": C.todate_max(LIMITS, s["os1_access"]),   # None = không giới hạn (loại 2)
                                        "desk_online": time.time() - seen < DESK_ONLINE_SEC, "desk_seen": seen,
                                        "limits": LIMITS, "fx25": C.FX25, "symbols": C.symbols_info(), "groups": C.GROUPS, "periods": C.PERIODS, "job_types": C.JOB_TYPES})
             if parts == ["alphas"]:
@@ -748,7 +748,7 @@ class Handler(BaseHTTPRequestHandler):
         u = con.execute("select slug, os1_access from users where id=?", (uid,)).fetchone()
         out = {"id": qrow["id"], "slug": u["slug"], "kind": qrow["kind"], "question": qrow["question"],
                "account": {"os1_access": bool(u["os1_access"]), "alpha_suffix": alpha_suffix(u["slug"]),
-                           "todate_max": LIMITS["os1_end"] if u["os1_access"] else LIMITS["is_end"]}}
+                           "todate_max": C.todate_max(LIMITS, u["os1_access"]) or "không giới hạn (gồm cả OS2 từ 2026-01-01)"}}
         if qrow["kind"] == "job":
             j = con.execute("select * from jobs where id=? and user_id=?", (qrow["ref_id"], uid)).fetchone()
             if j:
@@ -1233,7 +1233,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def desk_import(self, con, body):
         """Desk đăng ký một report offline (Dương/agent chạy ngoài web) cho một tài khoản. Web kiểm lại:
-        không bao giờ nhận OS2 (todate > os1_end hoặc thiếu todate); tài khoản loại 1 không nhận report vượt is_end."""
+        tài khoản loại 1 không nhận report vượt is_end hoặc thiếu todate; loại 2 nhận tới t2_end ("" = không giới hạn,
+        kể cả OS2 và report không ghi todate - Dương 2026-11-21)."""
         if not isinstance(body, dict):
             return self.fail(400, "JSON không hợp lệ")
         u = con.execute("select id, os1_access from users where slug=?", (str(body.get("slug", "")),)).fetchone()
@@ -1242,9 +1243,14 @@ class Handler(BaseHTTPRequestHandler):
         key, cfg = body.get("ext_key"), body.get("config")
         if not isinstance(key, str) or not key or len(key) > 400 or not isinstance(cfg, dict):
             return self.fail(400, "thiếu ext_key/config")
-        td = str(cfg.get("todate", ""))
-        limit = LIMITS["os1_end"] if u["os1_access"] else LIMITS["is_end"]
-        if not C.DATE_RE.match(td) or td == "0" or td > limit:
+        td = str(cfg.get("todate") or "")
+        limit = C.todate_max(LIMITS, u["os1_access"])
+        if limit is None:           # loại 2 không giới hạn: todate trống/0 = chạy tới hết dữ liệu
+            if td in ("", "0", "0000.00.00"):
+                cfg["todate"] = ""
+            elif not C.DATE_RE.match(td):
+                return self.send_json({"ok": False, "error": f"todate {td} không hợp lệ"}, 400)
+        elif not C.DATE_RE.match(td) or td == "0" or td > limit:
             return self.send_json({"ok": False, "error": f"todate {td or '(trống)'} vượt {limit} hoặc không hợp lệ"}, 400)
         cfg["type"] = "offline"
         alpha = str(body.get("alpha", ""))[:120]

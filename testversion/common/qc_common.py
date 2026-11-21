@@ -71,7 +71,8 @@ DEFAULT_LIMITS = {
     "max_variants": 2000,        # số biến thể tối đa của một job optimize
     "max_variants_smoke": 20,
     "is_end": "2024.01.01",      # trader loại 1 (không có quyền OS1): job không được vượt mốc này
-    "os1_end": "2026.01.01",     # trader loại 2 (có quyền OS1) và job OS1: không vượt mốc này. OS2 không bao giờ chạy qua web
+    "os1_end": "2026.01.01",     # job OS1 chạy tới mốc này (tiêu chí OS1 2024-2026)
+    "t2_end": "",                # trader loại 2: mốc todate tối đa; "" = không giới hạn, được chạy cả OS2 (Dương 2026-11-21)
     "min_from": "2003.01.01",
     "smoke_max_days": 92,        # hàng smoke chạy song song với optimize nên phải ngắn
     "smoke_max_symbols": 3,
@@ -142,10 +143,10 @@ def _num(v, name, lo=None, hi=None):
 
 def validate_job(cfg, catalog, limits=None, os1_access=False):
     """Trả về (cfg_sạch, lỗi). catalog: {tên_tham_số: [start, step, stop]} của alpha được chọn (từ data-server).
-    os1_access: trader loại 2 được chạy đến os1_end; loại 1 chỉ đến is_end."""
+    os1_access: trader loại 2 được chạy đến t2_end ("" = không giới hạn, kể cả OS2); loại 1 chỉ đến is_end."""
     lim = dict(DEFAULT_LIMITS, **(limits or {}))
     if os1_access:
-        lim["is_end"] = lim["os1_end"]
+        lim["is_end"] = lim.get("t2_end") or None
     errs = []
     if not isinstance(cfg, dict):
         return None, ["cấu hình phải là object"]
@@ -187,8 +188,8 @@ def validate_job(cfg, catalog, limits=None, os1_access=False):
         out["fromdate"], out["todate"] = cfg["fromdate"], cfg["todate"]
         if fd < _date(lim["min_from"]):
             errs.append(f"fromdate phải >= {lim['min_from']}")
-        if td > _date(lim["is_end"]):
-            errs.append(f"todate phải <= {lim['is_end']}" + (" (không được chạm OS2)" if os1_access
+        if lim["is_end"] and td > _date(lim["is_end"]):
+            errs.append(f"todate phải <= {lim['is_end']}" + ("" if os1_access
                         else " (tài khoản của bạn chỉ chạy IS; OS1 chạy qua trang Alpha pass IS)"))
         if fd >= td:
             errs.append("fromdate phải trước todate")
@@ -348,3 +349,9 @@ def os1_eval(daily, crypto=False, is_end=OS1_IS_END, os_end=OS1_OS_END):
     if not enough:
         res["os_note"] = "OS1 quá ngắn (cần > 100 ngày có dữ liệu)"
     return res
+
+
+def todate_max(limits, os1_access):
+    """Mốc todate tối đa của tài khoản: loại 1 -> is_end; loại 2 -> t2_end, None = không giới hạn."""
+    lim = dict(DEFAULT_LIMITS, **(limits or {}))
+    return (lim.get("t2_end") or None) if os1_access else lim["is_end"]

@@ -42,7 +42,7 @@ DATA_FOLDER = CFG["data_folder"]
 SWAP_FOLDER = CFG["swap_folder"]
 LIMITS = dict(C.DEFAULT_LIMITS, **CFG.get("limits", {}))
 # auto_approve: CHỈ Dương bật trong desk_config.json (data-server là nơi quyết định, không tin cờ nào từ web)
-# os1_access: trader loại 2 (được chạy job tới os1_end). Cũng CHỈ Dương bật trong desk_config.json.
+# os1_access: trader loại 2 (được chạy job tới t2_end, mặc định không giới hạn kể cả OS2 - Dương 2026-11-21). Cũng CHỈ Dương bật trong desk_config.json.
 TRADERS = {slug: {"dir": Path(t["dir"]).resolve(), "name": t["name"], "auto_approve": t.get("auto_approve") is True,
                   "os1_access": t.get("os1_access") is True}
            for slug, t in CFG["traders"].items()}
@@ -301,14 +301,18 @@ def ini_config(ini_text, n_variants):
             "lot": tester.get("lot", ""), "variants": n_variants, "params": inputs}
 
 
-def report_dates_ok(db):
-    """OS2 không bao giờ lên web: mọi run phải có todate và todate <= os1_end (2026.01.01)."""
+def report_dates_ok(db, os1_access=False):
+    """Report offline được lên web không. Loại 2 (t2_end trống = không giới hạn): nhận cả OS2 và report không ghi todate.
+    Còn lại: mọi run phải có todate và todate <= mốc của tài khoản."""
+    lim = C.todate_max(LIMITS, os1_access)
+    if lim is None:
+        return True
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         tds = [(r[0] or "").replace(".", "").replace("-", "") for r in con.execute("select distinct todate from input")]
     finally:
         con.close()
-    lim = LIMITS["os1_end"].replace(".", "")
+    lim = lim.replace(".", "")
     return bool(tds) and all(len(x) == 8 and x.isdigit() and x != "00000000" and x <= lim for x in tds)
 
 
@@ -350,7 +354,8 @@ def import_one(imp, run_dir, key, sig, idx):
 
 def scan_imports():
     """Quét các gốc report offline; report mới hoặc đã đổi (mtime/size results.sqlite) thì gửi lên web.
-    Bỏ qua report đang ghi (sửa < 2 phút), report có OS2 hoặc không ghi todate. Mã alpha KHÔNG gửi lên web."""
+    Bỏ qua report đang ghi (sửa < 2 phút), report vượt mốc todate của tài khoản (loại 2: không giới hạn).
+    Report từng bị bỏ qua được xét lại mỗi lượt (mốc có thể đã nới). Mã alpha KHÔNG gửi lên web."""
     idx = imports_index()
     n_new = n_skip = 0
     for imp in IMPORTS:
@@ -373,19 +378,21 @@ def scan_imports():
                     continue
                 key = imp["source"] + ":" + (str(run_dir.relative_to(imp["root"])) if imp["root"] in run_dir.parents else run_dir.name)
                 sig = f"{int(stt.st_mtime)}:{stt.st_size}"
-                if idx.get(key, {}).get("sig") == sig:
+                if idx.get(key, {}).get("sig") == sig and not idx[key].get("skipped"):
                     continue
-                if not report_dates_ok(db):
-                    idx[key] = {"jid": None, "sig": sig, "skipped": "OS2 hoặc thiếu todate"}
-                    n_skip += 1
-                    continue
-                import_one(imp, run_dir, key, sig, idx)
-                n_new += 1
+                if not report_dates_ok(db, TRADERS[imp["slug"]]["os1_access"]):
+                    if idx.get(key, {}).get("sig") == sig:
+                        continue
+                    idx[key] = {"jid": None, "sig": sig, "skipped": "vượt mốc todate hoặc thiếu todate"}
+                    n_skip += 1          # không `continue` ở đây: phải ghi imports.json để lần sau không đếm lại
+                else:
+                    import_one(imp, run_dir, key, sig, idx)
+                    n_new += 1
             except Exception as e:  # noqa: BLE001
                 log(f"nhập report {dirpath} lỗi: {e!r}")
             IMPORTS_FILE.write_text(json.dumps(idx, indent=1, ensure_ascii=False), encoding="utf-8")
     if n_new or n_skip:
-        log(f"nhập report offline: {n_new} mới/đổi, {n_skip} bỏ qua (OS2/thiếu todate)")
+        log(f"nhập report offline: {n_new} mới/đổi, {n_skip} bỏ qua (vượt mốc/thiếu todate)")
 
 
 def import_loop():
@@ -481,7 +488,8 @@ def prepare_os1(jid, slug, t, cfg):
     if not row:
         raise JobError("Không đọc được biến thể nguồn.")
     symbol, params = row[0], json.loads(row[1] or "{}")
-    if (row[2] or "").replace(".", "") > C.OS1_IS_END:
+    td = (row[2] or "").replace(".", "")
+    if not td.isdigit() or td == "00000000" or td > C.OS1_IS_END:      # trống/0 = chạy tới hết dữ liệu
         raise JobError("Job gốc đã chạy qua 2024-01-01, kết quả OS1 đã có trong chính job đó.")
     src_ini = (run_dir / "input-optimize.ini").read_text(encoding="utf-8", errors="replace").lstrip("﻿")
     alpha = ini_value(src_ini, "alpha_name")
@@ -795,6 +803,9 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
     timeout_min = SMOKE_TIMEOUT_MIN if smoke else (RUN_TIMEOUT_OS1_MIN if t.get("os1_access") else RUN_TIMEOUT_MIN)
     t0 = t0 or time.time()
     cap_args = ["--cpu-cap", str(CPU_CAP_OS1)] if t.get("os1_access") else []
+    t2_end = C.todate_max(LIMITS, True)
+    if t.get("os1_access") and (t2_end is None or t2_end > C.DEFAULT_LIMITS["os1_end"]):
+        cap_args += ["--allow-os2"]      # rq_run tự kiểm lại: chỉ hiệu lực cho thư mục trader loại 2 trong desk_config
 
     def launch(cmd):
         """Chạy rq_run (chờ khi run khác giữ giới hạn CPU). Trả về file trạng thái, hoặc None nếu đã báo lỗi/hủy."""

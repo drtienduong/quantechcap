@@ -210,11 +210,15 @@ async function pageRun(main, name) {
   const a = r.alphas.find((x) => x.name === name);
   if (!a) { main.replaceChildren(h("p", { class: "err" }, "Không tìm thấy alpha " + name)); return; }
   const lim = ST.limits;
-  const isEnd = ST.todate_max || lim.is_end;
+  // Loại 2: todate_max = null -> không giới hạn (kể cả OS2, Dương 2026-11-21); mặc định = hôm nay (tới hết dữ liệu)
+  const unlimited = ST.todate_max === null && ST.os1_access;
+  const isEnd = unlimited ? null : (ST.todate_max || lim.is_end);
+  const pad = (n) => String(n).padStart(2, "0");
+  const today = () => { const d = new Date(); return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`; };
   const f = {
     mode: h("select", {}, h("option", { value: "independent" }, "Từng symbol riêng"), h("option", { value: "portfolio" }, "Portfolio (chung 1 tài khoản)")),
     period: h("select", {}, ST.periods.map((p) => h("option", { value: p, selected: p === ((a.meta && a.meta.required_period) || "H1") }, p))),
-    from: h("input", { type: "text", value: "0", size: 10 }), to: h("input", { type: "text", value: isEnd, size: 10 }),
+    from: h("input", { type: "text", value: "0", size: 10 }), to: h("input", { type: "text", value: unlimited ? today() : isEnd, size: 10 }),
     deposit: h("input", { type: "number", value: 10000 }), leverage: h("input", { type: "text", value: "1:1000", size: 7, title: "Tối đa 1:1000. Margin call 100%, stop-out 50%." }),
     swap: h("select", {}, h("option", { value: "zero" }, "zero (không swap)"), h("option", { value: "synthetic" }, "synthetic")),
     lot: h("input", { type: "number", value: 0.01, step: "any" }), pv: h("input", { type: "number", value: 100000 }),
@@ -247,6 +251,7 @@ async function pageRun(main, name) {
   }
   f.from.addEventListener("input", () => { autoFrom = f.from.value.trim() === "0"; if (autoFrom) fixFrom(); });
   f.from.addEventListener("change", fixFrom);
+  f.to.addEventListener("change", () => { if (f.to.value.trim() === "0") f.to.value = unlimited ? today() : isEnd; });
   boxes.forEach((b) => b.addEventListener("change", fixFrom));
   fixFrom();
   const setSyms = (list) => { boxes.forEach((b) => { b.checked = list.includes(b.value); }); fixFrom(); };
@@ -306,7 +311,8 @@ async function pageRun(main, name) {
     h("h2", {}, "Chạy: ", h("span", { class: "mono" }, name)),
     h("div", { class: "card" }, h("div", { class: "row" },
       h("label", {}, "Khung thời gian" + (reqP ? ` (alpha yêu cầu ${reqP})` : ""), h("br"), f.period),
-      h("label", { title: "Gõ 0 để lấy ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn" }, "Ngày bắt đầu (0 = sớm nhất)", h("br"), f.from, fromHint), h("label", {}, "Đến ngày (≤ " + isEnd + ")", h("br"), f.to)),
+      h("label", { title: "Gõ 0 để lấy ngày bắt đầu dữ liệu sớm nhất của các symbol đã chọn" }, "Ngày bắt đầu (0 = sớm nhất)", h("br"), f.from, fromHint), h("label", unlimited ? { title: "Không giới hạn, gồm cả OS2 (từ 2026.01.01). Gõ 0 = hôm nay (tới hết dữ liệu). Ngày cuối dữ liệu khác nhau theo symbol (FX tới 2026.04.28)." } : {},
+        unlimited ? "Đến ngày (không giới hạn, 0 = hết dữ liệu)" : "Đến ngày (≤ " + isEnd + ")", h("br"), f.to)),
       periodWarn),
     h("div", { class: "card" }, h("h3", {}, "Symbol"), h("div", { class: "row" }, h("label", {}, "Chế độ", h("br"), f.mode),
       h("button", { class: "btn", on: { click: () => setSyms(ST.fx25.slice(0, 20)) } }, "20 cặp"),
@@ -762,7 +768,7 @@ async function pageJob(main, id, runId) {
         else { ev.target.disabled = false; alert((r.error || "Lỗi") + (r.details ? "\n" + r.details.join("\n") : "")); }
       } } }, "Chạy lại job này") : null,
       c.type === "os1" ? os1Head(job) : [
-      h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate} · swap ${c.swap_mode} · ${c.variants} biến thể`),
+      h("p", {}, `${c.type} · ${c.symbols_mode} · ${c.symbols.length} symbol (${c.symbols.slice(0, 6).join(", ")}${c.symbols.length > 6 ? "…" : ""}) · ${c.period} · ${c.fromdate} → ${c.todate || "hết dữ liệu"} · swap ${c.swap_mode} · ${c.variants} biến thể`),
       h("p", { class: "mono muted" }, Object.entries(c.params).filter(([, v]) => v[1] > 0).map(([k, v]) => `${k}: ${v[0]}→${v[2]} step ${v[1]}`).join("  |  ") || "(không có lưới)")],
       live ? h("button", { class: "btn danger", on: { click: async () => { await api(`/api/jobs/${id}/cancel`, {}); render(); } } }, "Hủy job") : null,
       job.owner ? h("p", { class: "muted small" }, `Tài khoản: ${job.owner.slug} (${job.owner.email})` + (job.deleted ? " · ĐÃ XÓA" : "") +
