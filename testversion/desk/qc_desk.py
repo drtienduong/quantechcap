@@ -701,6 +701,17 @@ MAX_CONTINUES = 3               # run dừng giữa chừng -> tự chạy tiế
 _PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"]+")
 
 
+DATA_UPDATE_LOCK = Path(CFG.get("data_update_lock") or r"D:\quantechcap-data-research\data-update\data_update.lock")
+
+
+def data_update_locked():
+    """qc_data_update đang ghi nối data-tickstory (khóa cũ hơn 12 giờ coi như bỏ quên)."""
+    try:
+        return time.time() - DATA_UPDATE_LOCK.stat().st_mtime < 12 * 3600
+    except OSError:
+        return False
+
+
 def rq_runs_active():
     """PID các run rq_run đang chạy trên máy (của web, agent hay alpha-lab). Chúng giữ giới hạn CPU dùng chung,
     run mới không vào được cho tới khi chúng xong."""
@@ -815,6 +826,11 @@ def start_and_monitor(jid, slug, t, alpha, alpha_path, ini, smoke, lane, fail, c
             if waited > RUN_WAIT_MAX_MIN:
                 fail(f"Data-server bận quá {RUN_WAIT_MAX_MIN} phút nên job chưa chạy được. Hãy gửi lại sau.")
                 return None
+            if data_update_locked():          # đang ghi nối dữ liệu tick (qc_data_update): chờ, không tính vào giới hạn chờ
+                t_wait = time.time()
+                upd(jid, message="Data-server đang cập nhật dữ liệu tick hằng tuần; job sẽ tự bắt đầu khi xong (thường vài phút)")
+                time.sleep(30)
+                continue
             if not rq_runs_active():
                 r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
                 out = (r.stdout or "") + (r.stderr or "")
