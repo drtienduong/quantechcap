@@ -723,42 +723,72 @@ def main():
         if s.endswith("_BN"):
             report.setdefault("binance_join", {})[s] = verify_binance_join(s)
             log(f"đối chiếu chỗ nối Binance {s}: {report['binance_join'][s]}")
-    metas, errors = stage_all(syms, a.workers)
-    report.update(staged=metas, errors=errors)
     bad_join = {s for s, v in report.get("binance_join", {}).items() if v != "khớp"}
-    if a.run:
+    errors, metas, added = [], [], {}
+    report.update(staged=metas, errors=errors, appended=added)
+
+    def do_append(m):
+        """Ghi ngay sau khi chuẩn bị xong (khóa chỉ giữ trong lúc ghi một symbol)."""
+        if m["sym"] in bad_join:
+            errors.append({"sym": m["sym"], "error": "chỗ nối Binance không khớp, không ghi"})
+            return
         if not wait_idle():
-            report["append"] = "bỏ: backtest chạy quá 6 giờ"
-        else:
-            LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time()}))
+            errors.append({"sym": m["sym"], "error": "backtest chạy quá 6 giờ, chưa ghi"})
+            return
+        LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time(), "sym": m["sym"]}))
+        try:
+            added[m["sym"]] = append_one(m)
+            if added[m["sym"]]:
+                log(f"ghi {m['sym']}: +{added[m['sym']]} tick")
+        except Exception as e:  # noqa: BLE001
+            errors.append({"sym": m["sym"], "error": str(e)})
+            log(f"ghi {m['sym']}: LỖI {e}")
+        finally:
+            LOCK.unlink(missing_ok=True)
+
+    now = datetime.now(timezone.utc)
+    end_hour = (now - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
+    probe = end_hour - timedelta(days=2)
+
+    def cached(s):          # symbol đã có bộ nhớ đệm gần đây (FX) chạy trước: vào platform sớm
+        p = TS_CACHE / s / str(probe.year) / f"{probe.month - 1:02d}" / f"{probe.day:02d}"
+        return 0 if p.is_dir() else 1
+    order = sorted([s for s in syms if s not in PEG], key=lambda s: (s.endswith("_BN"), cached(s), s))
+    order += [s for s in syms if s in PEG]
+    for s in order:
+        t1 = time.time()
+        try:
+            if s in PEG:
+                ref = PEG[s]
+                rn, _ = bin_info(ref)
+                m = stage_peg(s, int(read_recs(ref, rn - 1, 1)[0]["date"]))
+            elif s.endswith("_BN"):
+                m = stage_binance(s, now.date())
+            else:
+                m = stage_duka(s, end_hour, a.workers)
+            metas.append(m)
+            log(f"stage {s}: +{m['new_count']} tick, {m.get('first_new')} -> {m.get('last_new')}, {m.get('stop')}, "
+                f"bỏ {m.get('dropped_bad', 0)} tick lỗi, {time.time() - t1:.0f}s")
+        except Exception as e:  # noqa: BLE001
+            errors.append({"sym": s, "error": str(e)})
+            log(f"stage {s}: LỖI {e}")
+            continue
+        if a.run and m["new_count"]:
+            do_append(m)
+    if a.run:
+        if not a.no_swap and wait_idle():
+            LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time(), "step": "swap"}))
             try:
-                added = {}
-                for m in metas:
-                    if m["sym"] in bad_join:
-                        errors.append({"sym": m["sym"], "error": "chỗ nối Binance không khớp, không ghi"})
-                        continue
-                    if busy_runs():
-                        if not wait_idle():
-                            break
+                sw = {}
+                for c in sorted(SWAP_DIR.glob("*_synthetic_swap.csv")):
                     try:
-                        added[m["sym"]] = append_one(m)
-                        if added[m["sym"]]:
-                            log(f"ghi {m['sym']}: +{added[m['sym']]} tick")
+                        k = extend_swap(c)
+                        if k:
+                            sw[c.name] = k
                     except Exception as e:  # noqa: BLE001
-                        errors.append({"sym": m["sym"], "error": str(e)})
-                        log(f"ghi {m['sym']}: LỖI {e}")
-                report["appended"] = added
-                if not a.no_swap:
-                    sw = {}
-                    for c in sorted(SWAP_DIR.glob("*_synthetic_swap.csv")):
-                        try:
-                            k = extend_swap(c)
-                            if k:
-                                sw[c.name] = k
-                        except Exception as e:  # noqa: BLE001
-                            errors.append({"swap": c.name, "error": str(e)})
-                    report["swap_rows_added"] = sw
-                    log(f"swap: nối {sum(sw.values())} dòng ở {len(sw)} file")
+                        errors.append({"swap": c.name, "error": str(e)})
+                report["swap_rows_added"] = sw
+                log(f"swap: nối {sum(sw.values())} dòng ở {len(sw)} file")
             finally:
                 LOCK.unlink(missing_ok=True)
         if not a.no_mt5:               # đồng bộ symbol *_Tickstory trong MT5 (service QTC_TickSync), không cần khóa
