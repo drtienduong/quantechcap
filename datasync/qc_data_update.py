@@ -124,8 +124,9 @@ def dt_of(ymd, tod=0):
 
 
 # ---------------- Dukascopy ----------------
-def http_get(url, tries=12, timeout=60):
-    """Trả bytes (200), None (404), hoặc ném lỗi sau nhiều lần thử (503/timeout: chờ tăng dần tới 2 phút)."""
+def http_get(url, tries=20, timeout=60):
+    """Trả bytes (200), None (404), hoặc ném lỗi sau nhiều lần thử.
+    Dukascopy (11/2026): ~30% yêu cầu hỏng ở bước kết nối (timeout 21 s) -> thử lại ngay; 503 -> chờ tăng dần."""
     err = None
     for i in range(tries):
         try:
@@ -135,9 +136,11 @@ def http_get(url, tries=12, timeout=60):
             if e.code == 404:
                 return None
             err = e
+            time.sleep(min(60, 5 * (i + 1)))       # 503/5xx: máy chủ quá tải
+            continue
         except Exception as e:  # noqa: BLE001
             err = e
-        time.sleep(min(120, 5 * 2 ** i))
+        time.sleep(2 if i < 10 else 30)            # lỗi kết nối: thử lại nhanh
     raise RuntimeError(f"tải lỗi {url}: {err!r}")
 
 
@@ -145,10 +148,16 @@ def duka_hour(sym, h):
     """bytes bi5 của giờ h (UTC): b'' = không có tick, None = Dukascopy chưa có giờ này."""
     rel = Path(sym, str(h.year), f"{h.month - 1:02d}", f"{h.day:02d}", f"{h.hour:02d}h_ticks.bi5")
     hour_end = (h + timedelta(hours=1)).timestamp()
-    for base in (RAW, TS_CACHE):
-        p = base / rel
-        if p.exists() and p.stat().st_mtime >= hour_end + 2 * 3600:   # tải sau khi giờ đã khép 2 tiếng -> đầy đủ
-            return p.read_bytes()
+    p = RAW / rel                      # bản tự tải: chỉ lưu khi Dukascopy trả 200 -> luôn tin
+    if p.exists():
+        return p.read_bytes()
+    p = TS_CACHE / rel                 # bộ nhớ đệm Tickstory: mtime không phải lúc tải (đã so 106 file: giống hệt bản tải mới)
+    if p.exists():
+        st = p.stat()
+        weekend = sym not in ("BTCUSD", "ETHUSD") and (          # crypto Dukascopy giao dịch cả cuối tuần
+            (h.weekday() == 4 and h.hour >= 22) or h.weekday() == 5 or (h.weekday() == 6 and h.hour < 21))
+        if st.st_size > 0 or weekend or st.st_mtime >= hour_end + 2 * 3600:
+            return p.read_bytes()      # file rỗng ngày thường (có thể là giờ chưa có lúc Tickstory tải) -> tải lại
     b = http_get(DUKA_URL.format(sym=sym, y=h.year, m=h.month - 1, d=h.day, h=h.hour))
     if b is None:
         return None
@@ -687,7 +696,7 @@ def main():
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--stage-only", action="store_true")
     ap.add_argument("--rollback")
-    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--no-swap", action="store_true")
     ap.add_argument("syms", nargs="*")
     a = ap.parse_args()
