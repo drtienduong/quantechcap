@@ -12,10 +12,12 @@
 //|        -> CustomTicksReplace bằng các tick trong file nhị phân     |
 //|           (bản ghi 44 byte: long msc, double bid, ask, last,       |
 //|            ulong volume, uint flags), kiểm lại số tick sau khi ghi |
+//|   cmd=delete symbol= from_msc= to_msc= -> CustomTicksDelete        |
+//|        (hoàn tác: xóa phần đã nối sau tick cuối cũ)                |
 //+------------------------------------------------------------------+
 #property service
 #property copyright "QuanTechCap"
-#property version   "1.00"
+#property version   "1.01"
 
 #define QDIR "QuanTechCap\\mt5sync\\"
 #define SUFFIX "_Tickstory"
@@ -108,7 +110,7 @@ int LastTicks(const string s, MqlTick &t[], int count)
 
 void CmdInfo(const string id)
   {
-   string out = "ok=1\nversion=1.00\nterminal_time=" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\n";
+   string out = "ok=1\nversion=1.01\nterminal_time=" + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\n";
    int total = SymbolsTotal(false);
    for(int i = 0; i < total; i++)
      {
@@ -219,12 +221,26 @@ void CmdReplace(const string id)
       FileDelete(f, FILE_COMMON);
   }
 
+void CmdDelete(const string id)
+  {
+   string s = Val("symbol");
+   if(!AllowedSymbol(s))
+     {
+      WriteOut(id, "ok=0\nerror=symbol khong hop le: " + s + "\n");
+      return;
+     }
+   long from = StringToInteger(Val("from_msc")), to = StringToInteger(Val("to_msc"));
+   ResetLastError();
+   int n = CustomTicksDelete(s, from, to);
+   WriteOut(id, StringFormat("ok=%d\ndeleted=%d\nerror_code=%d\n", (n >= 0 ? 1 : 0), n, GetLastError()));
+  }
+
 void WriteStatus(const string state)
   {
    int h = FileOpen(QDIR + "service_status.txt", FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(h == INVALID_HANDLE)
       return;
-   FileWriteString(h, "version=1.00\nstate=" + state + "\nlocal_time=" + TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS) + "\n");
+   FileWriteString(h, "version=1.01\nstate=" + state + "\nlocal_time=" + TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS) + "\n");
    FileClose(h);
   }
 
@@ -278,6 +294,9 @@ void ProcessRequests()
          else
             if(cmd == "replace")
                CmdReplace(id);
+            else
+               if(cmd == "delete")
+                  CmdDelete(id);
             else
                WriteOut(id, "ok=0\nerror=lenh la: " + cmd + "\n");
      }

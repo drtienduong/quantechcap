@@ -698,6 +698,7 @@ def main():
     ap.add_argument("--rollback")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--no-swap", action="store_true")
+    ap.add_argument("--no-mt5", action="store_true")
     ap.add_argument("syms", nargs="*")
     a = ap.parse_args()
     for d in (WORK, LOGS, STAGE):
@@ -760,6 +761,19 @@ def main():
                     log(f"swap: nối {sum(sw.values())} dòng ở {len(sw)} file")
             finally:
                 LOCK.unlink(missing_ok=True)
+        if not a.no_mt5:               # đồng bộ symbol *_Tickstory trong MT5 (service QTC_TickSync), không cần khóa
+            try:
+                import qc_mt5_sync
+                end_hour = (datetime.now(timezone.utc) - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
+                r = qc_mt5_sync.sync_all(end_hour)
+                report["mt5"] = r
+                if r.get("error"):
+                    log("MT5:", r["error"])
+                else:
+                    log(f"MT5: {len(r['done'])} symbol, {sum(x['added'] for x in r['done'])} tick, {len(r['errors'])} lỗi")
+                    errors += [dict(x, mt5=True) for x in r["errors"]]
+            except Exception as e:  # noqa: BLE001
+                errors.append({"mt5": True, "error": str(e)})
     report["errors"] = errors
     report["minutes"] = round((time.time() - t0) / 60, 1)
     REPORT.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
