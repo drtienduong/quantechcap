@@ -102,16 +102,79 @@ function QC_APP() {
   (async () => { await refreshStatus(); route(); setInterval(() => refreshStatus().catch(() => {}), 5000); })();
 }
 
+/* Dòng job: mỗi ô là liên kết thật -> chuột phải có "Mở trong tab mới", Ctrl/giữa chuột mở tab mới; bấm thường như cũ */
+function jobTr(id, ...kids) {
+  const href = "#/job/" + id;
+  const tr = h("tr", { class: "click", on: { click: (ev) => { if (ev.target.closest("a,input,button,select,label")) return; location.hash = href; } } }, ...kids);
+  for (const td of tr.children) {
+    if (td.querySelector("a,input,button,select")) continue;
+    const a = h("a", { href, class: "rowlink" });
+    a.append(...td.childNodes);
+    td.append(a);
+  }
+  return tr;
+}
+
 /* ---------- trang alpha ---------- */
 async function pageAlphas(main) {
   const r = await api("/api/alphas");
-  const rows = r.alphas.map((a) => h("tr", {}, h("td", { class: "mono" }, a.name), h("td", {}, Object.keys(a.params).length + " tham số"),
-    h("td", {}, (a.meta && a.meta.required_period) ? h("b", {}, a.meta.required_period) : h("span", { class: "muted" }, "tùy chọn")),
-    h("td", { class: "muted" }, a.updated), h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))));
-  main.replaceChildren(h("h2", {}, "Alpha của bạn"),
-    h("div", { class: "card" }, r.alphas.length ? h("table", {}, h("tr", {}, h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Khung"), h("th", {}, "Đồng bộ"), h("th")), rows)
-      : h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "bộ khung"), " rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), ".")),
-    h("p", { class: "muted" }, "Alpha đã duyệt được lưu và chạy trên data-server. Danh sách đồng bộ mỗi phút."));
+  let sortBy = localStorage.getItem("qc_alpha_sort") || "uploaded";      // mặc định: mới tải lên trước
+  const selected = new Set();
+  const msg = h("div", {});
+  const box = h("div", { class: "card" });
+  const delBtn = h("button", { class: "btn danger", disabled: true, on: { click: async () => {
+    const names = [...selected];
+    if (!names.length) return;
+    if (!confirm(`Xóa ${names.length} alpha?
+
+${names.join("\n")}
+
+Alpha bị gỡ khỏi danh sách và không chạy job mới được nữa. ` +
+      `Kết quả các job đã chạy vẫn giữ nguyên (mỗi report đã lưu bản mã alpha của nó). Trên data-server, file alpha được chuyển vào thùng rác ` +
+      `và tự xóa hẳn sau 30 ngày. Muốn dùng lại thì nộp lại alpha.`)) return;
+    delBtn.disabled = true;
+    const res = await api("/api/alphas/delete", { names });
+    const bad = (res.results || []).filter((x) => !x.ok);
+    msg.replaceChildren(h("p", { class: bad.length || !res.ok ? "warn" : "muted" }, res.ok
+      ? `Đã xóa ${(res.results || []).length - bad.length} alpha.` + (bad.length ? " Không xóa được: " + bad.map((x) => `${x.name} (${x.reason})`).join(", ") : "")
+      : (res.error || "Lỗi")));
+    const ok = new Set((res.results || []).filter((x) => x.ok).map((x) => x.name));
+    r.alphas = r.alphas.filter((a) => !ok.has(a.name));
+    selected.clear();
+    draw();
+  } } }, "Xóa đã chọn");
+  const syncDel = () => { delBtn.disabled = !selected.size; delBtn.textContent = selected.size ? `Xóa đã chọn (${selected.size})` : "Xóa đã chọn"; };
+  const sortSel = h("select", { on: { change: (ev) => { sortBy = ev.target.value; localStorage.setItem("qc_alpha_sort", sortBy); draw(); } } },
+    h("option", { value: "uploaded", selected: sortBy === "uploaded" }, "Mới tải lên trước"),
+    h("option", { value: "uploaded_asc", selected: sortBy === "uploaded_asc" }, "Cũ trước"),
+    h("option", { value: "name", selected: sortBy === "name" }, "Tên A → Z"));
+  function draw() {
+    const list = [...r.alphas];
+    const up = (a) => a.uploaded || "";
+    if (sortBy === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+    else list.sort((a, b) => (sortBy === "uploaded" ? up(b).localeCompare(up(a)) : up(a).localeCompare(up(b))) || a.name.localeCompare(b.name));
+    syncDel();
+    if (!list.length) {
+      box.replaceChildren(h("p", { class: "muted" }, "Chưa có alpha. Viết alpha theo ", h("a", { href: "/guide_ai", target: "_blank", rel: "noopener" }, "bộ khung"),
+        " rồi nộp ở trang ", h("a", { href: "#/submit" }, "Nộp alpha"), "."));
+      return;
+    }
+    const allBox = h("input", { type: "checkbox", title: "Chọn tất cả", checked: selected.size === list.length, on: { change: (ev) => {
+      list.forEach((a) => { if (ev.target.checked) selected.add(a.name); else selected.delete(a.name); }); draw(); } } });
+    box.replaceChildren(h("div", { class: "pager" }, h("label", {}, "Sắp xếp ", sortSel), delBtn), msg,
+      h("table", {}, h("tr", {}, h("th", {}, allBox), h("th", {}, "Tên"), h("th", {}, "Tham số"), h("th", {}, "Khung"), h("th", {}, "Tải lên (UTC)"), h("th")),
+        list.map((a) => h("tr", {},
+          h("td", {}, h("input", { type: "checkbox", checked: selected.has(a.name), title: "Chọn để xóa",
+            on: { change: (ev) => { if (ev.target.checked) selected.add(a.name); else selected.delete(a.name); syncDel(); } } })),
+          h("td", { class: "mono" }, a.name), h("td", {}, Object.keys(a.params).length + " tham số"),
+          h("td", {}, (a.meta && a.meta.required_period) ? h("b", {}, a.meta.required_period) : h("span", { class: "muted" }, "tùy chọn")),
+          h("td", { class: "muted" }, a.uploaded || "–"),
+          h("td", {}, h("a", { href: "#/run/" + encodeURIComponent(a.name), class: "btn primary" }, "Chạy backtest/optimize"))))));
+  }
+  draw();
+  main.replaceChildren(h("h2", {}, "Alpha của bạn"), box,
+    h("p", { class: "muted" }, "Alpha đã duyệt được lưu và chạy trên data-server. Danh sách đồng bộ mỗi phút. " +
+      "Xóa alpha không ảnh hưởng kết quả các job đã chạy (report giữ bản mã alpha riêng)."));
 }
 
 /* ---------- nộp alpha ---------- */
@@ -393,7 +456,7 @@ async function pageJobs(main, page) {
       last = ""; load(); } } })) : null;
     box.replaceChildren(...(r.jobs.length ? [srcBar, canDel ? h("div", { class: "pager" }, delBtn, delMsg) : null, pagerEl(pages, r.total), h("table", {},
       h("tr", {}, allBox, h("th", {}, "#"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Tiến độ"), h("th", {}, "Ghi chú"), h("th", {}, "Tạo lúc (UTC)")),
-      r.jobs.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
+      r.jobs.map((j) => jobTr(j.id,
         cb(j), h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"), h("td", {}, tag(j.status)),
         h("td", {}, j.status === "running" || j.status === "dispatched" ? fmt(j.progress, 0) + "%" : (j.summary ? j.summary.variants + " biến thể" : "")),
         h("td", { class: j.status === "failed" ? "err small" : (j.notice ? "warn small" : "muted small") }, j.notice || (j.status === "done" ? "" : j.message || "")),
@@ -441,10 +504,19 @@ async function pageAdmin(main, tab) {
     const r = await api("/api/admin/alphas" + (qs.get("user") ? "?user=" + qs.get("user") : ""));
     body.replaceChildren(h("div", { class: "row" }, h("label", {}, "Tài khoản", h("br"), userSel(qs.get("user"), (v) => goto("alphas", new URLSearchParams(v ? { user: v } : {}))))),
       h("p", { class: "muted small" }, `${r.alphas.length} alpha. Mã nguồn alpha chỉ nằm trên data-server; duyệt bản nộp bằng qc_review trên data-server.`),
-      h("table", {}, h("tr", {}, h("th", {}, "Tài khoản"), h("th", {}, "Alpha"), h("th", {}, "Khung"), h("th", {}, "Tham số"), h("th", {}, "Job"), h("th", {}, "Cập nhật (UTC)")),
+      h("table", {}, h("tr", {}, h("th", {}, "Tài khoản"), h("th", {}, "Alpha"), h("th", {}, "Khung"), h("th", {}, "Tham số"), h("th", {}, "Job"), h("th", {}, "Tải lên (UTC)"), h("th")),
         r.alphas.map((a) => h("tr", {}, h("td", {}, a.slug), h("td", { class: "mono" }, a.name), h("td", {}, a.required_period || "–"),
           h("td", { class: "mono small" }, a.params.join(", ")),
-          h("td", {}, h("a", { href: `#/admin/jobs?user=${a.user_id}&q=${encodeURIComponent(a.name)}` }, String(a.jobs))), h("td", { class: "muted" }, a.updated)))));
+          h("td", {}, h("a", { href: `#/admin/jobs?user=${a.user_id}&q=${encodeURIComponent(a.name)}` }, String(a.jobs))), h("td", { class: "muted" }, a.uploaded || "–"),
+          h("td", {}, h("button", { class: "btn danger", on: { click: async (ev) => {
+            if (!confirm(`Xóa alpha ${a.name} của ${a.slug}?
+
+Kết quả các job đã chạy giữ nguyên (report có bản mã riêng). File alpha vào thùng rác của trader, tự xóa hẳn sau 30 ngày.`)) return;
+            ev.target.disabled = true;
+            const res = await api("/api/admin/alphas/delete", { items: [{ user_id: a.user_id, name: a.name }] });
+            const x = (res.results || [])[0] || {};
+            if (x.ok) ev.target.closest("tr").remove(); else { ev.target.disabled = false; alert("Không xóa được: " + (x.reason || res.error || "lỗi")); }
+          } } }, "Xóa"))))));
     return;
   }
   if (t0 === "subs") {
@@ -549,7 +621,7 @@ async function adminJobs(body, qs, userSel, goto) {
       body.querySelectorAll("input.jsel").forEach((b) => { b.checked = ev.target.checked; b.dispatchEvent(new Event("change")); }); } } })),
       h("th", {}, "#"), h("th", {}, "Tài khoản"), h("th", {}, "Alpha"), h("th", {}, "Loại"), h("th", {}, "Nguồn"), h("th", {}, "Trạng thái"), h("th", {}, "Kết quả"),
       h("th", {}, "Thùng rác"), h("th", {}, "Tạo lúc (UTC)")),
-      r.rows.map((j) => h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
+      r.rows.map((j) => jobTr(j.id,
         h("td", { on: { click: (ev) => ev.stopPropagation() } }, canAct(j) ? h("input", { type: "checkbox", class: "jsel", on: { change: (ev) => {
           if (ev.target.checked) selected.add(j.id); else selected.delete(j.id); sync(); } } }) : h("span", { class: "muted small", title: "Không xóa được (đang chạy, OS1 hoặc nguồn của OS1)" }, "–")),
         h("td", {}, j.id), h("td", {}, j.slug), h("td", { class: "mono" }, j.alpha), h("td", {}, j.type), h("td", { class: "muted" }, j.source || "web"),
@@ -701,7 +773,7 @@ async function pageOs1(main, page) {
         h("th", {}, "Kết quả"), h("th", {}, "Tạo lúc (UTC)")),
       r.jobs.map((j) => {
         const o = (j.summary && j.summary.os1) || null;
-        return h("tr", { class: "click", on: { click: () => { location.hash = "#/job/" + j.id; } } },
+        return jobTr(j.id,
           h("td", {}, j.id), h("td", { class: "mono" }, j.alpha), h("td", {}, `job #${j.src_job_id} run ${j.src_run_id}`),
           h("td", {}, tag(j.status), j.status === "running" || j.status === "dispatched" ? " " + fmt(j.progress, 0) + "%" : "",
             j.status === "failed" ? h("div", { class: "err small" }, j.message || "") : null),

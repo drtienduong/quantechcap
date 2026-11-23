@@ -289,6 +289,30 @@ def job_deletable(con, j, children=None):
     return True, ""
 
 
+def delete_alphas(con, uid, names):
+    """Xóa alpha của tài khoản uid (Dương 2026-11-23: mọi loại tài khoản, kể cả alpha đã chạy job - report giữ alpha.rs).
+    Ẩn ngay trên web, giao data-server chuyển file alpha vào thùng rác. Không xóa khi alpha đang có job chờ/chạy."""
+    out = []
+    for n in names[:200]:
+        n = str(n)
+        if not con.execute("select 1 from alphas where user_id=? and name=?", (uid, n)).fetchone():
+            out.append({"name": n, "ok": False, "reason": "không có alpha này"})
+            continue
+        busy = con.execute("select id from jobs where user_id=? and alpha=? and status in ('queued','dispatched','running') "
+                           "and coalesce(deleted,0)=0 limit 1", (uid, n)).fetchone()
+        if busy:
+            out.append({"name": n, "ok": False, "reason": f"đang có job #{busy['id']} chờ/chạy"})
+            continue
+        con.execute("delete from alphas where user_id=? and name=?", (uid, n))
+        con.execute("insert into meta(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+                    (f"alpha_del:{uid}:{n}", str(time.time())))
+        con.execute("insert into requests(user_id,job_id,kind,payload_json,status,created) values(?,?,?,?,?,?)",
+                    (uid, 0, "alpha_delete", json.dumps({"name": n}), "pending", time.time()))
+        out.append({"name": n, "ok": True})
+    con.commit()
+    return out
+
+
 def delete_jobs(con, ids, actor_id, owner_uid=None):
     """Xóa mềm: ẩn job khỏi web; job chạy trên web -> yêu cầu data-server chuyển report vào thùng rác.
     Report offline (của Dương/agent) chỉ ẩn, không động vào file. owner_uid=None: admin (mọi tài khoản)."""
@@ -598,7 +622,7 @@ class Handler(BaseHTTPRequestHandler):
                                    (uid,)).fetchall()
                 return self.send_json({"ok": True, "alphas": [
                     {"name": r["name"], "params": json.loads(r["params_json"]), "meta": json.loads(r["meta_json"] or "{}"),
-                     "updated": r["updated"]} for r in rows]})
+                     "updated": r["updated"], "uploaded": json.loads(r["meta_json"] or "{}").get("uploaded")} for r in rows]})
             if parts == ["jobs"] and method == "GET":
                 off = max(0, int(q.get("offset", ["0"])[0]))
                 lim = min(100, max(1, int(q.get("limit", ["30"])[0])))
@@ -619,6 +643,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "total": total, "offline_total": n_off, "can_delete": can_del,
                                        "jobs": [dict(self.job_row(r), notice=job_notice(con, r),
                                                      deletable=can_del and job_deletable(con, r, kids)[0]) for r in rows]})
+            if parts == ["alphas", "delete"] and method == "POST":
+                body = self.read_json()
+                names = body.get("names") if isinstance(body, dict) else None
+                if not isinstance(names, list) or not names:
+                    return self.fail(400, "chọn ít nhất một alpha")
+                return self.send_json({"ok": True, "results": delete_alphas(con, uid, names)})
             if parts == ["jobs", "delete"] and method == "POST":
                 if not (s["os1_access"] or s["is_admin"]):
                     return self.fail(403, "tài khoản của bạn không có quyền xóa report")
@@ -1054,6 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "alphas": [
                 {"name": r["name"], "slug": r["slug"], "user_id": r["user_id"], "params": list(json.loads(r["params_json"]).keys()),
                  "required_period": json.loads(r["meta_json"] or "{}").get("required_period"), "updated": r["updated"],
+                 "uploaded": json.loads(r["meta_json"] or "{}").get("uploaded"),
                  "jobs": con.execute("select count(*) from jobs where user_id=? and alpha=? and coalesce(deleted,0)=0",
                                      (r["user_id"], r["name"])).fetchone()[0]} for r in rows]})
         if parts == ["submissions"] and method == "GET":
@@ -1105,6 +1136,17 @@ class Handler(BaseHTTPRequestHandler):
                 d["trash"] = trash_state(con, r["id"]) if r["deleted"] or r["type"] != "offline" else None
                 out.append(d)
             return self.send_json({"ok": True, "total": total, "rows": out})
+        if parts == ["alphas", "delete"] and method == "POST":
+            items = body().get("items")
+            if not isinstance(items, list) or not items:
+                return self.fail(400, "chọn ít nhất một alpha")
+            res = []
+            for it in items[:200]:
+                try:
+                    res += delete_alphas(con, int(it["user_id"]), [str(it["name"])])
+                except (KeyError, TypeError, ValueError):
+                    res.append({"name": str(it), "ok": False, "reason": "mục không hợp lệ"})
+            return self.send_json({"ok": True, "results": res})
         if parts in (["jobs", "delete"], ["jobs", "restore"]) and method == "POST":
             ids = body().get("ids")
             if not isinstance(ids, list) or not ids:
@@ -1137,10 +1179,15 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("insert into meta(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
                             ("desk_sync:" + slug, json.dumps({"at": time.time(), **dcfg})))
                 con.execute("delete from alphas where user_id=?", (u["id"],))
+                pending_del = {r[0].split(":", 2)[2] for r in con.execute("select k from meta where k like ?", (f"alpha_del:{u['id']}:%",))}
                 for a in items:
                     if isinstance(a.get("name"), str) and C.NAME_RE.match(a["name"]) and isinstance(a.get("params"), dict):
+                        if a["name"] in pending_del:          # đang chờ data-server xóa: không hiện lại
+                            continue
                         m = a.get("meta") if isinstance(a.get("meta"), dict) else {}
                         meta = {"required_period": m["required_period"]} if m.get("required_period") in C.PERIODS else {}
+                        if isinstance(m.get("uploaded"), str) and re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d", m["uploaded"]):
+                            meta["uploaded"] = m["uploaded"]
                         con.execute("insert into alphas(user_id,name,params_json,meta_json,updated) values(?,?,?,?,?)",
                                     (u["id"], a["name"], json.dumps(a["params"]), json.dumps(meta), now_iso()))
                 con.commit()
@@ -1173,6 +1220,10 @@ class Handler(BaseHTTPRequestHandler):
                 res = body if isinstance(body, dict) else {"ok": False, "error": "kết quả không hợp lệ"}
                 con.execute("update requests set status='done', result_json=? where id=?",
                             (json.dumps(res, ensure_ascii=False), int(parts[1])))
+                rq = con.execute("select user_id, kind, payload_json from requests where id=?", (int(parts[1]),)).fetchone()
+                if rq and rq["kind"] == "alpha_delete":     # xong (hoặc lỗi): bỏ cờ chờ; lỗi thì alpha hiện lại ở lần đồng bộ sau
+                    nm = json.loads(rq["payload_json"] or "{}").get("name", "")
+                    con.execute("delete from meta where k=?", (f"alpha_del:{rq['user_id']}:{nm}",))
                 con.commit()
                 return self.send_json({"ok": True})
             return self.fail(404, "không tìm thấy")

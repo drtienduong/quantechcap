@@ -120,12 +120,14 @@ def scan_alphas(slug):
                 except Exception:  # noqa: BLE001
                     rp = None
                 meta[p.stem] = {"required_period": rp} if rp else {}
+                # thời điểm alpha được cài vào thư mục alpha của trader (= lúc tải lên được duyệt), giờ UTC
+                meta[p.stem]["uploaded"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(p.stat().st_mtime))
     _meta[slug] = meta
     return res
 
 
-def sync_catalog(force=False):
-    for slug in TRADERS:
+def sync_catalog(force=False, only=None):
+    for slug in (only or TRADERS):
         try:
             cat = scan_alphas(slug)
         except Exception as e:  # noqa: BLE001
@@ -1279,8 +1281,41 @@ def trash_loop():
         time.sleep(TRASH_CHECK_SEC)
 
 
+def handle_alpha_delete(slug, name):
+    """Xóa alpha (Dương 2026-11-23): chuyển <trader>/alpha/<tên>.rs vào <trader>/trash/<thời điểm>_alpha_<tên>/,
+    tự xóa hẳn sau TRASH_DAYS ngày như report. Report của các job đã chạy giữ bản alpha.rs riêng nên không ảnh hưởng."""
+    t = TRADERS.get(slug)
+    if not t or not isinstance(name, str) or not C.NAME_RE.match(name) or not name.endswith("_" + t["name"]):
+        return {"ok": False, "error": "tên alpha không hợp lệ"}
+    src = (t["dir"] / "alpha" / (name + ".rs")).resolve()
+    if (t["dir"] / "alpha").resolve() != src.parent:
+        return {"ok": False, "error": "đường dẫn không hợp lệ"}
+    if not src.exists():
+        sync_catalog(force=True, only=[slug])
+        return {"ok": True, "note": "alpha không còn trên data-server"}
+    dst = (t["dir"] / "trash" / f"{time.strftime('%Y%m%d_%H%M%S')}_alpha_{name}").resolve()
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst / src.name))
+    (dst / "_trash.json").write_text(json.dumps({"trashed_at": time.time(), "job_id": None, "alpha": name,
+                                                 "from": str(src)}), encoding="utf-8")
+    log(f"xóa alpha {name} ({slug}): vào thùng rác")
+    sync_catalog(force=True, only=[slug])
+    return {"ok": True, "note": f"đã chuyển vào thùng rác, tự xóa hẳn sau {TRASH_DAYS:g} ngày"}
+
+
 def handle_request(req):
     rid, slug, kind, jid, pl = req["id"], req["slug"], req["kind"], req["job_id"], req["payload"]
+    if kind == "alpha_delete":
+        try:
+            res = handle_alpha_delete(slug, (pl or {}).get("name"))
+        except Exception as e:  # noqa: BLE001
+            log(f"xóa alpha lỗi: {e!r}")
+            res = {"ok": False, "error": "lỗi phía data-server: " + _PATH_RE.sub("<đường dẫn>", repr(e))[:200]}
+        try:
+            api("POST", f"/api/desk/requests/{rid}/result", res, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            log("gửi kết quả xóa alpha lỗi", repr(e))
+        return
     if kind in ("trash", "restore"):
         try:
             res = handle_trash(slug, jid, kind)
