@@ -244,13 +244,20 @@ def sync_all(end_hour, only=None):
         if s is None:
             out["skipped"].append({"sym": name, "reason": "MT5 không có tick"})
             continue
-        try:
-            r = sync_symbol(name, s, end_hour)
-            out["done"].append(r)
-            log(f"{name}: +{r['added']} tick, {r['stop']}")
-        except Exception as e:  # noqa: BLE001
-            out["errors"].append({"sym": name, "error": str(e)})
-            log(f"{name}: LỖI {e}")
+        for attempt in range(3):      # dừng do tải lỗi -> thử lại từ tick cuối mới (tối đa 2 lượt)
+            try:
+                r = sync_symbol(name, s, end_hour)
+                out["done"].append(r)
+                log(f"{name}: +{r['added']} tick, {r['stop']}")
+            except Exception as e:  # noqa: BLE001
+                out["errors"].append({"sym": name, "error": str(e)})
+                log(f"{name}: LỖI {e}")
+                break
+            if "tải lỗi" not in r["stop"] and "503" not in r["stop"] and "Error" not in r["stop"]:
+                break
+            s = parse_info().get(name)
+            if s is None:
+                break
     return out
 
 

@@ -755,26 +755,35 @@ def main():
         return 0 if p.is_dir() else 1
     order = sorted([s for s in syms if s not in PEG], key=lambda s: (s.endswith("_BN"), cached(s), s))
     order += [s for s in syms if s in PEG]
-    for s in order:
-        t1 = time.time()
-        try:
-            if s in PEG:
-                ref = PEG[s]
-                rn, _ = bin_info(ref)
-                m = stage_peg(s, int(read_recs(ref, rn - 1, 1)[0]["date"]))
-            elif s.endswith("_BN"):
-                m = stage_binance(s, now.date())
-            else:
-                m = stage_duka(s, end_hour, a.workers)
-            metas.append(m)
-            log(f"stage {s}: +{m['new_count']} tick, {m.get('first_new')} -> {m.get('last_new')}, {m.get('stop')}, "
-                f"bỏ {m.get('dropped_bad', 0)} tick lỗi, {time.time() - t1:.0f}s")
-        except Exception as e:  # noqa: BLE001
-            errors.append({"sym": s, "error": str(e)})
-            log(f"stage {s}: LỖI {e}")
-            continue
-        if a.run and m["new_count"]:
-            do_append(m)
+    pending = order
+    for attempt in range(3):      # Dukascopy hay lỗi kết nối: symbol dừng sớm được thử lại cuối lần chạy (tối đa 2 lượt)
+        retry = []
+        for s in pending:
+            t1 = time.time()
+            try:
+                if s in PEG:
+                    ref = PEG[s]
+                    rn, _ = bin_info(ref)
+                    m = stage_peg(s, int(read_recs(ref, rn - 1, 1)[0]["date"]))
+                elif s.endswith("_BN"):
+                    m = stage_binance(s, now.date())
+                else:
+                    m = stage_duka(s, end_hour, a.workers)
+                metas.append(m)
+                log(f"stage {s}: +{m['new_count']} tick, {m.get('first_new')} -> {m.get('last_new')}, {m.get('stop')}, "
+                    f"bỏ {m.get('dropped_bad', 0)} tick lỗi, {time.time() - t1:.0f}s")
+            except Exception as e:  # noqa: BLE001
+                errors.append({"sym": s, "error": str(e)})
+                log(f"stage {s}: LỖI {e}")
+                continue
+            if a.run and m["new_count"]:
+                do_append(m)
+            if a.run and str(m.get("stop", "")).startswith("tải lỗi"):
+                retry.append(s)
+        if not retry:
+            break
+        log(f"thử lại lượt {attempt + 2} cho {len(retry)} symbol dừng sớm: {', '.join(retry)}")
+        pending = retry
     if a.run:
         if not a.no_swap and wait_idle():
             LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time(), "step": "swap"}))
